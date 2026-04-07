@@ -17,8 +17,7 @@ st.set_page_config(page_title="PPML - Prédiction Retards", layout="wide")
 st.title("✈️ Prédiction des Retards Aériens")
 st.markdown("### API FastAPI + Pipeline complet")
 
-# API_URL = "https://patjedhahf-ppml-api-hf.hf.space/predict"
-API_URL = "https://patjedhahf-ppml-api-hf.hf.space/predire_et_sauvegarder"
+API_URL = os.getenv("API_URL")
 
 # Mapping ICAO → Nom complet
 airport_names = {
@@ -35,16 +34,28 @@ airport_names = {
 
 @st.cache_data(show_spinner=True, ttl=600)
 def load_future_data_from_s3():
-    bucket_name = (os.getenv("BUCKET"),)
     try:
-        session = boto3.Session(
-            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-            region_name=os.getenv("AWS_DEFAULT_REGION", "eu-north-1"),
-        )
         bucket = os.getenv("BUCKET")
+        aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
+        aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+        region_name = os.getenv("AWS_DEFAULT_REGION", "eu-north-1")
+
+        if not all([aws_access_key_id, aws_secret_access_key, bucket]):
+            st.error(
+                "❌ Variables AWS manquantes (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, BUCKET)"
+            )
+            return pd.DataFrame()
+
         s3_key = "datasets/vue_future.parquet"
-        df = pd.read_parquet(f"s3://{bucket}/{s3_key}")
+        df = pd.read_parquet(
+            f"s3://{bucket}/{s3_key}",
+            storage_options={
+                "key": aws_access_key_id,
+                "secret": aws_secret_access_key,
+                "region": region_name,
+                "anon": False,
+            },
+        )
         # Nettoyage léger
         if "delay_minutes" in df.columns:
             df["delay_minutes"] = df["delay_minutes"].where(
@@ -177,7 +188,7 @@ else:
 
     st.sidebar.write(f"**{len(filtered_df)} vols** sélectionnés")
 
-    if st.sidebar.button("🔮 Prédire les vols sélectionnés", type="primary"):
+    if st.sidebar.button("Prédire les vols sélectionnés", type="primary"):
         if len(filtered_df) == 0:
             st.warning("Aucun vol ne correspond aux filtres.")
         else:
@@ -199,79 +210,48 @@ else:
                             f"✅ {data['total_predictions']} prédictions générées avec succès !"
                         )
                         st.info(
-                            f"📊 Envoyés : {len(records)} | Retournés : {data['total_predictions']}"
+                            f" Envoyés : {len(records)} | Retournés : {data['total_predictions']}"
                         )
 
-                        # Création du DataFrame avec plus de précision
-                        display_data = []
-                        for p in preds:
-                            # Gestion de l'heure précise
-                            heure_affichee = p.get("scheduled_hour", "—")
-                            date_affichee = ""
-
-                            # Si on a scheduled_utc (format ISO), on l'utilise pour plus de précision
-                            if p.get("scheduled_utc"):
-                                try:
-                                    date_affichee = p["scheduled_utc"]
-                                except:
-                                    pass
-
-                            delay = p["predicted_delay_minutes"]
-
-                            display_data.append(
+                        # Affichage du tableau
+                        df_display = pd.DataFrame(
+                            [
                                 {
-                                    "ID": p.get("mouvement_id", "—"),
+                                    "ID": p["mouvement_id"],
                                     "Aéroport": p["icao"],
                                     "Nom Aéroport": airport_names.get(
                                         p["icao"], p["icao"]
                                     ),
-                                    "Type": p["type"].capitalize(),
+                                    "Type": p["type"],
                                     "Compagnie": p["airline"],
-                                    "Heure": heure_affichee,
-                                    "Date": date_affichee,
-                                    "Retard prédit (min)": round(delay, 1),
-                                    "Gravité": "🔴 Important"
-                                    if delay >= 60
-                                    else "🟠 Modéré"
-                                    if delay >= 30
-                                    else "🟡 Faible"
-                                    if delay >= 15
-                                    else "🟢 Mineur",
+                                    "Heure": p["scheduled_hour"],
+                                    "Retard prédit (min)": round(
+                                        p["predicted_delay_minutes"], 2
+                                    ),
                                 }
-                            )
+                                for p in preds
+                            ]
+                        )
 
-                        df_display = pd.DataFrame(display_data)
-
-                        # Tri par retard décroissant
                         df_display = df_display.sort_values(
                             by="Retard prédit (min)", ascending=False
                         )
 
-                        # Affichage du tableau
-                        st.dataframe(
-                            df_display,
-                            use_container_width=True,
-                            height=650,
-                            hide_index=True,
-                        )
+                        st.dataframe(df_display, use_container_width=True, height=600)
 
-                        # Statistiques
                         avg = df_display["Retard prédit (min)"].mean()
                         med = df_display["Retard prédit (min)"].median()
                         high = (df_display["Retard prédit (min)"] > 30).sum()
-                        very_high = (df_display["Retard prédit (min)"] > 60).sum()
 
-                        col1, col2, col3, col4 = st.columns(4)
+                        col1, col2, col3 = st.columns(3)
                         col1.metric("Moyenne", f"{avg:.1f} min")
                         col2.metric("Médiane", f"{med:.1f} min")
                         col3.metric("Vols > 30 min", high)
-                        col4.metric("Vols > 60 min", very_high)
 
                     else:
                         st.error(
                             f"Erreur API ({response.status_code}) : {response.text}"
                         )
-
                 except Exception as e:
                     st.error(f"Erreur lors de la requête : {e}")
 

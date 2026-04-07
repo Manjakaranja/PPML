@@ -11,7 +11,7 @@ import warnings
 from src.comparison import match_predictions_with_reals, calculate_metrics
 from src.fetcher import (
     fetch_real_flights_from_aerodatabox,
-    fetch_all_movements_historical,
+    fetch_mouvements_raw,
     fetch_and_save_meteo_raw,
     load_historical_json_to_dataframe,
     load_meteo_json_to_dataframe,
@@ -63,7 +63,7 @@ async def fetch_and_save_aeroports(request: dict):
 
     try:
         print(
-            f" Construction du dataset d'entraînement du {date_debut} au {date_fin}..."
+            f" Construction du dataset des mouvements aeroports du {date_debut} au {date_fin}..."
         )
 
         # Conversion en objets date
@@ -86,9 +86,7 @@ async def fetch_and_save_aeroports(request: dict):
             print(f"    Traitement du jour : {date_str}")
 
             # Récupération pour ce jour
-            daily_data = fetch_all_movements_historical(
-                date_str, [icao] if icao else None
-            )
+            daily_data = fetch_mouvements_raw(date_str, [icao] if icao else None)
 
             # Fusion dans le gros dictionnaire
             all_data["airports"][date_str] = daily_data.get("airports", {})
@@ -105,7 +103,7 @@ async def fetch_and_save_aeroports(request: dict):
         all_data["metadata"]["total_flights"] = total_flights
 
         # ====================== SAUVEGARDE SUR S3 ======================
-        output_key = f"raw/movements_historical_{date_debut}_to_{date_fin}.json"
+        output_key = f"raw/mouvements_aeroport_{date_debut}_to_{date_fin}.json"
         s3_full_path = f"s3://ppml2026/{output_key}"
 
         # Sauvegarde via boto3 (pour gros JSON)
@@ -125,7 +123,7 @@ async def fetch_and_save_aeroports(request: dict):
             ContentType="application/json",
         )
 
-        print(f" Dataset d'entraînement sauvegardé sur S3 : {output_key}")
+        print(f" Dataset de mouvements aeroports sauvegardé sur S3 : {output_key}")
         print(f"   Période : {date_debut} → {date_fin}")
         print(f"   Total vols : {total_flights}")
 
@@ -198,8 +196,8 @@ async def fetch_and_save_meteo(request: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/construit_dataset_train")
-async def build_training_dataset(request: dict):
+@app.post("/construire_dataset_train")
+async def construire_dataset_train(request: dict):
     """
     Construit le dataset complet d'entraînement :
     - Chargement des mouvements
@@ -308,8 +306,8 @@ async def build_training_dataset(request: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/build_prediction_dataset")
-async def build_prediction_dataset(request: dict):
+@app.post("/construire_dataset_prediction")
+async def construire_dataset_prediction(request: dict):
     """
     Construit le dataset complet pour la prédiction (futur) :
     - Récupère les mouvements futurs (post-dates d'entraînement)
@@ -341,7 +339,7 @@ async def build_prediction_dataset(request: dict):
         print(f" Construction du dataset de PRÉDICTION du {date_debut} au {date_fin}")
 
         # ====================== 1. RÉCUPÉRATION MOUVEMENTS FUTURS ======================
-        print("📡 Récupération des mouvements aéroportuaires futurs...")
+        print(" Récupération des mouvements aéroportuaires futurs...")
 
         movements_response = await fetch_and_save_aeroports(
             {  # on réutilise la logique existante
@@ -373,7 +371,6 @@ async def build_prediction_dataset(request: dict):
         )
 
         meteo_s3_key = meteo_response.get("s3_key")
-        print(f" Météo future sauvegardée → {meteo_s3_key}")
 
         # ====================== 3. CONSTRUCTION DU DATASET FINAL ======================
         print(
