@@ -1,0 +1,16 @@
+# requirements.txt
+
+pandas
+numpy
+scikit-learn
+xgboost
+category-encoders
+mlflow
+pyyaml
+python-dotenv
+joblib
+fastapi
+uvicorn[standard]
+pydantic
+boto3
+logging

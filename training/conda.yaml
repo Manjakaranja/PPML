@@ -1,0 +1,22 @@
+# conda.yaml
+
+name: ppml-flight-delay
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - pandas
+      - numpy
+      - scikit-learn
+      - xgboost
+      - category-encoders
+      - mlflow
+      - pyyaml
+      - python-dotenv
+      - joblib
+      - fastapi
+      - uvicorn[standard]
+      - pydantic

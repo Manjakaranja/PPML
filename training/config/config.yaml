@@ -1,0 +1,23 @@
+# config/config.yaml
+
+preprocessing:
+  test_size: 0.2
+  random_state: 42
+
+cleaning:
+  delay_lower: -30
+  delay_upper: 300
+  rare_threshold: 0.005
+
+model:
+  type: "xgboost"
+  n_estimators: 1500
+  learning_rate: 0.04
+  max_depth: 9
+  early_stopping_rounds: 80
+  random_state: 42
+
+mlflow:
+  experiment_name: "ppml-flight-delay-prediction"
+  model_name: "ppml-delay-pipeline"
+  run_name_prefix: "xgboost-mlproject"
