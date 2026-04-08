@@ -1,0 +1,15 @@
+name: env_ppml
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pandas
+  - sqlalchemy
+  - psycopg2
+  - boto3
+  - tqdm
+  - requests
+  - python-dotenv
+  - pip
+  - pip:
+      - awswrangler

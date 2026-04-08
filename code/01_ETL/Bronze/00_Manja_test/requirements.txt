@@ -1,0 +1,8 @@
+tqdm
+requests
+sqlalchemy
+psycopg2-binary
+awswrangler
+boto3
+pandas
+python-dotenv
