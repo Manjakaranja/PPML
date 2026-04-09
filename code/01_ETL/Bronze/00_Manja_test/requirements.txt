@@ -6,3 +6,8 @@ awswrangler
 boto3
 pandas
 python-dotenv
+scikit-learn
+shap
+matplotlib
+seaborn
+plotly
