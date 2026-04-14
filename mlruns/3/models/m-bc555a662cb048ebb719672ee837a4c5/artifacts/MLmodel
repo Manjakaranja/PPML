@@ -1,0 +1,24 @@
+artifact_path: file:///c:/Users/surel/Desktop/Formation_DATA_JEDHA/FORMATION DATA
+  SCIENCE/certif/PPML CDG/mlruns/3/models/m-bc555a662cb048ebb719672ee837a4c5/artifacts
+flavors:
+  python_function:
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.sklearn
+    model_path: model.pkl
+    predict_fn: predict
+    python_version: 3.11.15
+  sklearn:
+    code: null
+    pickled_model: model.pkl
+    serialization_format: cloudpickle
+    sklearn_version: 1.8.0
+    skops_trusted_types: null
+mlflow_version: 3.11.1
+model_id: m-bc555a662cb048ebb719672ee837a4c5
+model_size_bytes: 10887
+model_uuid: m-bc555a662cb048ebb719672ee837a4c5
+prompts: null
+run_id: 4bcb7966d2a64ff3a3200149838fc18a
+utc_time_created: '2026-04-09 20:24:10.212406'
