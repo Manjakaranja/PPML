@@ -1,0 +1,28 @@
+# Environnements
+venv/
+env/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+*.env
+
+# Données volumineuses
+*.csv
+*.parquet
+*.zip
+data/
+donnees_*/
+data_*/
+
+# Notebooks temporaires
+.ipynb_checkpoints/
+
+# Config locales
+.vscode/
+.idea/
+.DS_Store
