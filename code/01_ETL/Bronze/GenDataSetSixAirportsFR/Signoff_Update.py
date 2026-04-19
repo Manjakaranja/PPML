@@ -1,4 +1,3 @@
-
 import pandas as pd
 from datetime import datetime
 import sys
@@ -10,7 +9,7 @@ cong_path = "OutputFlights/congestion_WW_updated.csv"
 
 # Ajout de la date dans le nom du fichier de sortie
 date_gen = datetime.now().strftime("%Y%m%d_%H%M%S")
-output_path = f"SignofFlightsDataset_{date_gen}.csv"
+output_path = f"SignoffFlightsDataset_Large_{date_gen}.csv"
 
 # Lecture du seuil de retard en minutes (par défaut 15)
 
@@ -143,11 +142,16 @@ date_row.iloc[0, 1] = date_gen_human
 last_col = flights.columns[-1]
 flights[last_col] = pd.to_numeric(flights[last_col], errors='coerce').apply(lambda v: 1 if pd.notna(v) and v != 0 else 0).astype(int)
 
-flights_with_date = pd.concat([date_row, flights], ignore_index=True)
 
 
-flights_with_date.to_csv(output_path, index=False, encoding="utf-8-sig")
-print(f"Fichier généré : {output_path} (généré le {date_gen_human})")
+# Suppression des colonnes contenant 'NBVol' dans leur nom
+def drop_nnbvol_columns(df):
+    cols_to_drop = [col for col in df.columns if 'NBVol' in col]
+    if cols_to_drop:
+        df = df.drop(columns=cols_to_drop)
+    return df
+
+
 
 # Affichage du pourcentage de 1 dans la dernière colonne (hors ligne d'en-tête spéciale)
 last_col = flights.columns[-1]
@@ -212,7 +216,8 @@ if col_dest in flights.columns and col_retard in flights.columns:
     print(f"% de cas où '{col_dest}' = 1 quand '{col_retard}' = 1 : {percent_dest_when_retard:.2f}% ({dest_when_retard}/{nb_total})")
 
 
-# Affichage du pourcentage de cas où la colonne 'status' est égale à 'Unknown'
+
+# Génération d'un seul fichier de sortie : flights_clean.csv
 col_status = 'status'
 if col_status in flights.columns:
     nb_unknown = (flights[col_status].astype(str).str.strip().str.lower() == 'unknown').sum()
@@ -223,8 +228,21 @@ if col_status in flights.columns:
     # Suppression des lignes où status == 'Unknown'
     flights_clean = flights[flights[col_status].astype(str).str.strip().str.lower() != 'unknown'].copy()
     print(f"Lignes restantes après suppression des 'Unknown' : {len(flights_clean)}/{nb_total}")
-    # Sauvegarde du CSV nettoyé
-    output_clean = output_path.replace('.csv', '_CLEAN.csv')
-    flights_clean_with_date = pd.concat([date_row, flights_clean], ignore_index=True)
-    flights_clean_with_date.to_csv(output_clean, index=False, encoding="utf-8-sig")
-    print(f"Fichier nettoyé généré : {output_clean}")
+else:
+    flights_clean = flights.copy()
+
+# Suppression des colonnes NBVol
+flights_clean = drop_nnbvol_columns(flights_clean)
+
+# Ajout de la date en première ligne
+date_row_clean = pd.DataFrame([{col: "" for col in flights_clean.columns}])
+date_row_clean.iloc[0, 0] = "DATE_GENERATION"
+date_row_clean.iloc[0, 1] = date_gen_human
+flights_clean_with_date = pd.concat([date_row_clean, flights_clean], ignore_index=True)
+
+# Sauvegarde unique
+output_clean = output_path.replace('.csv', '_CLEAN.csv')
+flights_clean_with_date.to_csv(output_clean, index=False, encoding="utf-8-sig")
+print(f"Fichier nettoyé généré : {output_clean}")
+
+

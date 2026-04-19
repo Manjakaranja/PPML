@@ -1,18 +1,21 @@
+from typing_extensions import final
+
 import pandas as pd
 from datetime import datetime
 import sys
 
 
 # Fichiers d'entrée
-flights_path = "FlightsAndMeteoAndJFVacancesAndGreves_future.csv"
-cong_path = "OutputFlights/congestion_WW_future_updated.csv"
+flights_path = "FlightsAndMeteoAndJFVacancesAndGreves_Single.csv"
+cong_path = "OutputSingleFlight/vols_journaliers_single.csv"
 
+ 
 # Ajout de la date dans le nom du fichier de sortie
 date_gen = datetime.now().strftime("%Y%m%d_%H%M%S")
-output_path = f"SignoffFlightsDataset_future_{date_gen}.csv"
+output_path = f"SignoffFlightsDataset_Single_{date_gen}.csv"
+
 
 # Lecture du seuil de retard en minutes (par défaut 15)
-
 # Entrer Seuil  Delai
 delay_threshold = 15
 if len(sys.argv) > 1:
@@ -29,8 +32,9 @@ else:
         except Exception:
             print("Entrée non valide, utilisation de 15 min par défaut.")
 
-# Chargement des données
 
+
+# Chargement des données
 flights = pd.read_csv(flights_path, encoding="utf-8-sig")
 cong = pd.read_csv(cong_path, encoding="utf-8-sig")
 
@@ -47,8 +51,8 @@ cong['flight_date'] = cong['flight_date'].astype(str).str.strip()
 cong['airport'] = cong['airport'].astype(str).str.strip().str.upper()
 
 # Préparation des colonnes à ajouter
-source_cols = ['nombre_departs', 'nombre_arrivees', 'somme_depart_arrivee', 'congestion']
-dest_cols = ['nombre_departs', 'nombre_arrivees', 'somme_depart_arrivee', 'congestion']
+source_cols = ['nombre_departures', 'nombre_arrivals', 'somme_nombre_departs_arrivees','congestion']
+dest_cols = ['nombre_departures', 'nombre_arrivals', 'somme_nombre_departs_arrivees','congestion']
 
 # Pour chaque ligne, on va chercher les valeurs pour l'aéroport d'origine et de destination
 source_data = []
@@ -74,8 +78,6 @@ for idx, row in flights.iterrows():
 
 
 # Ajout des colonnes au DataFrame
-
-
 for i, col in enumerate(source_cols):
     vals = [vals[i] for vals in source_data]
     # Conversion stricte en int pour congestion_source
@@ -124,98 +126,6 @@ else:
     flights['retard arrivée'] = 0
 
 
-# Conversion robuste en int pour congestion_source et congestion_destination
-for col in ["congestion_source", "congestion_destination"]:
-    if col in flights.columns:
-        flights[col] = pd.to_numeric(flights[col], errors='coerce')
-        # Si vous voulez remplacer les NaN par 0, décommentez la ligne suivante :
-        flights[col] = flights[col].fillna(0)
-        flights[col] = flights[col].apply(lambda v: int(v) if pd.notna(v) else v)
-
-# Ajout de la date de génération dans le contenu du CSV (colonne spéciale en première ligne)
-date_gen_human = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-date_row = pd.DataFrame([{col: "" for col in flights.columns}])
-date_row.iloc[0, 0] = "DATE_GENERATION"
-date_row.iloc[0, 1] = date_gen_human
-
-# Forcer la dernière colonne à 0 ou 1 (logique)
-last_col = flights.columns[-1]
-flights[last_col] = pd.to_numeric(flights[last_col], errors='coerce').apply(lambda v: 1 if pd.notna(v) and v != 0 else 0).astype(int)
-
-
-
-# Suppression des colonnes contenant 'NBVol' dans leur nom
-def drop_nnbvol_columns(df):
-    cols_to_drop = [col for col in df.columns if 'NBVol' in col]
-    if cols_to_drop:
-        df = df.drop(columns=cols_to_drop)
-    return df
-
-
-
-# Affichage du pourcentage de 1 dans la dernière colonne (hors ligne d'en-tête spéciale)
-last_col = flights.columns[-1]
-nb_ones = flights[last_col].sum()
-nb_total = len(flights)
-percent_ones = (nb_ones / nb_total) * 100 if nb_total > 0 else 0
-
-print(f"% de 1 dans la colonne '{last_col}' : {percent_ones:.2f}% ({nb_ones}/{nb_total})")
-
-# Affichage du pourcentage de 1 dans la colonne 'congestion_destination'
-col = 'congestion_destination'
-if col in flights.columns:
-    col_vals = pd.to_numeric(flights[col], errors='coerce')
-    nb_ones = (col_vals == 1).sum()
-    nb_total = col_vals.notna().sum()
-    percent_ones = (nb_ones / nb_total) * 100 if nb_total > 0 else 0
-    print(f"% de 1 dans la colonne '{col}' : {percent_ones:.2f}% ({nb_ones}/{nb_total})")
-
-
-# Affichage du pourcentage de 1 dans la colonne 'congestion_destination'
-col = 'congestion_source'
-if col in flights.columns:
-    col_vals = pd.to_numeric(flights[col], errors='coerce')
-    nb_ones = (col_vals == 1).sum()
-    nb_total = col_vals.notna().sum()
-    percent_ones = (nb_ones / nb_total) * 100 if nb_total > 0 else 0
-    print(f"% de 1 dans la colonne '{col}' : {percent_ones:.2f}% ({nb_ones}/{nb_total})")
-
-# Affichage du pourcentage de cas où congestion_destination et congestion_source sont toutes les deux à 1
-col_dest = 'congestion_destination'
-col_src = 'congestion_source'
-if col_dest in flights.columns and col_src in flights.columns:
-    vals_dest = pd.to_numeric(flights[col_dest], errors='coerce')
-    vals_src = pd.to_numeric(flights[col_src], errors='coerce')
-    both_ones = ((vals_dest == 1) & (vals_src == 1)).sum()
-    nb_total = flights.shape[0]
-    percent_both_ones = (both_ones / nb_total) * 100 if nb_total > 0 else 0
-    print(f"% de cas où '{col_dest}' et '{col_src}' = 1 : {percent_both_ones:.2f}% ({both_ones}/{nb_total})")
-    
-
-
- # Affichage du pourcentage de cas où congestion_source est a 1 quand retard_arrivée est à 1    
-col_src = 'congestion_source'
-col_retard = 'retard arrivée'
-if col_src in flights.columns and col_retard in flights.columns:
-    vals_src = pd.to_numeric(flights[col_src], errors='coerce')
-    vals_retard = pd.to_numeric(flights[col_retard], errors='coerce')
-    src_when_retard = ((vals_src == 1) & (vals_retard == 1)).sum()
-    nb_total = (vals_retard == 1).sum()
-    percent_src_when_retard = (src_when_retard / nb_total) * 100 if nb_total > 0 else 0
-    print(f"% de cas où '{col_src}' = 1 quand '{col_retard}' = 1 : {percent_src_when_retard:.2f}% ({src_when_retard}/{nb_total})")
-
- # Affichage du pourcentage de cas où congestion_destination est a 1 quand retard_arrivée est à 1    
-col_dest = 'congestion_destination'
-col_retard = 'retard arrivée'
-if col_dest in flights.columns and col_retard in flights.columns:
-    vals_dest = pd.to_numeric(flights[col_dest], errors='coerce')
-    vals_retard = pd.to_numeric(flights[col_retard], errors='coerce')
-    dest_when_retard = ((vals_dest == 1) & (vals_retard == 1)).sum()
-    nb_total = (vals_retard == 1).sum()
-    percent_dest_when_retard = (dest_when_retard / nb_total) * 100 if nb_total > 0 else 0
-    print(f"% de cas où '{col_dest}' = 1 quand '{col_retard}' = 1 : {percent_dest_when_retard:.2f}% ({dest_when_retard}/{nb_total})")
-
-
 
 # Génération d'un seul fichier de sortie : flights_clean.csv
 col_status = 'status'
@@ -231,10 +141,13 @@ if col_status in flights.columns:
 else:
     flights_clean = flights.copy()
 
-# Suppression des colonnes NBVol
-flights_clean = drop_nnbvol_columns(flights_clean)
 
 # Ajout de la date en première ligne
+# Format humain pour la date de génération
+try:
+    date_gen_human = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+except Exception:
+    date_gen_human = date_gen
 date_row_clean = pd.DataFrame([{col: "" for col in flights_clean.columns}])
 date_row_clean.iloc[0, 0] = "DATE_GENERATION"
 date_row_clean.iloc[0, 1] = date_gen_human
@@ -245,4 +158,9 @@ output_clean = output_path.replace('.csv', '_CLEAN.csv')
 flights_clean_with_date.to_csv(output_clean, index=False, encoding="utf-8-sig")
 print(f"Fichier nettoyé généré : {output_clean}")
 
+# Génération d'un fichier ColList.csv avec la liste des colonnes du fichier final
+col_list_path = output_path.replace('.csv', '_ColList.csv') 
+col_list = pd.DataFrame({'columns': flights_clean.columns})
+col_list.to_csv(col_list_path, index=False, encoding="utf-8-sig")
+print(f"Fichier de liste des colonnes généré : {col_list_path}")
 
