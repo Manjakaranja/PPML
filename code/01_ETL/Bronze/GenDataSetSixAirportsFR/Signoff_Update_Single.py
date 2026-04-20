@@ -144,14 +144,18 @@ else:
 
 # Ajout de la date en première ligne
 # Format humain pour la date de génération
-try:
-    date_gen_human = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-except Exception:
-    date_gen_human = date_gen
-date_row_clean = pd.DataFrame([{col: "" for col in flights_clean.columns}])
-date_row_clean.iloc[0, 0] = "DATE_GENERATION"
-date_row_clean.iloc[0, 1] = date_gen_human
-flights_clean_with_date = pd.concat([date_row_clean, flights_clean], ignore_index=True)
+##-- try:
+##--     date_gen_human = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+##-- except Exception:
+##--     date_gen_human = date_gen
+##-- date_row_clean = pd.DataFrame([{col: "" for col in flights_clean.columns}])
+##-- date_row_clean.iloc[0, 0] = "DATE_GENERATION"
+##-- date_row_clean.iloc[0, 1] = date_gen_human
+##-- flights_clean_with_date = pd.concat([date_row_clean, flights_clean], ignore_index=True)
+
+
+flights_clean_with_date = flights.copy()
+
 
 # Sauvegarde unique
 output_clean = output_path.replace('.csv', '_CLEAN.csv')
