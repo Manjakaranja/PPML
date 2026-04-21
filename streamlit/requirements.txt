@@ -1,10 +1,4 @@
 streamlit
 pandas
 plotly
-requests
-numpy
-datetime
-dotenv
-boto3>=1.35.0
-fsspec>=2024.0.0
-s3fs>=2024.0.0
+streamlit_lottie

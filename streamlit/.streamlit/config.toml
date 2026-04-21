@@ -1,15 +1,15 @@
 [browser]
-serverAddress = '0.0.0.0'
+serverAddress = "0.0.0.0"
 
 [theme]
-base="dark"
-primaryColor="#4be8e0"
+base = "dark"
 
-[global]
-dataFrameSerialization = "legacy"
+# Couleurs principales harmonisées avec le PPT
+primaryColor = "#557fa3"          # Accent cyan + boutons, sliders, succès
+backgroundColor = "#010e27"       # Bleu très foncé (fond PPT)
+secondaryBackgroundColor = "#031538"  # Bleu marine légèrement plus clair pour les containers, sidebar, cartes
+textColor = "#f0f4f8"             # Blanc légèrement bleuté pour une bonne lisibilité sur fond sombre
 
-[theme]
-base="dark"
-primaryColor="#4be8e0"
-
-
+# Couleurs optionnelles (Streamlit v1.XX+)
+widgetBackgroundColor = "#031538"
+widgetBorderColor = "#4d74c3"     # Bordures subtiles en bleu moyen
