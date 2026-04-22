@@ -1,0 +1,3 @@
+# ETL qui prend donnée sur S3
+# MODELING PHASE
+# MLFLOW LOGGING PHASE

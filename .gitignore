@@ -18,6 +18,8 @@ __pycache__/
 data/
 donnees_*/
 data_*/
+*.joblib
+*.pkl
 
 # Notebooks temporaires
 .ipynb_checkpoints/

@@ -1,0 +1,27 @@
+﻿[
+  {
+    "flight_date": "2026-04-25",
+    "movement_date": "2026-04-25",
+    "flight_number": "AF 7330",
+    "airline": "Air France",
+    "airport_origin": "CDG",
+    "airport_destination": "MRS",
+    "terminal_departure": "2F",
+    "terminal_arrival": "1",
+    "scheduled_departure": "2026-04-25 07:20+02:00",
+    "scheduled_arrival": "2026-04-25 08:45+02:00",
+    "estimated_departure": "2026-04-25 07:20+02:00",
+    "estimated_arrival": "2026-04-25 08:45+02:00",
+    "actual_departure": null,
+    "actual_arrival": null,
+    "actual_source_departure": null,
+    "actual_source_arrival": null,
+    "departure_delay_min": null,
+    "departure_advance_min": null,
+    "arrival_delay_min": null,
+    "arrival_advance_min": null,
+    "status": "Expected",
+    "movement_type": "departure",
+    "codeshares": []
+  }
+]

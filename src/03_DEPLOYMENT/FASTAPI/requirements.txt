@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pydantic
+pandas
+pyarrow
+mlflow
+scikit-learn
+catboost
+python-multipart
+requests
+boto3
+python-dotenv

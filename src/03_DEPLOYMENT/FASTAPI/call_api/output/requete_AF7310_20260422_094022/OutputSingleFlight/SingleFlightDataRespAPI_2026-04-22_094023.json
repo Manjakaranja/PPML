@@ -1,0 +1,79 @@
+﻿[
+  {
+    "greatCircleDistance": {
+      "meter": 694878.87,
+      "km": 694.88,
+      "mile": 431.78,
+      "nm": 375.2,
+      "feet": 2279786.31
+    },
+    "departure": {
+      "airport": {
+        "icao": "LFPG",
+        "iata": "CDG",
+        "name": "Paris Charles de Gaulle",
+        "shortName": "Charles de Gaulle",
+        "municipalityName": "Paris",
+        "location": {
+          "lat": 49.0128,
+          "lon": 2.549999
+        },
+        "countryCode": "FR",
+        "timeZone": "Europe/Paris"
+      },
+      "scheduledTime": {
+        "utc": "2026-04-23 10:40Z",
+        "local": "2026-04-23 12:40+02:00"
+      },
+      "revisedTime": {
+        "utc": "2026-04-23 10:40Z",
+        "local": "2026-04-23 12:40+02:00"
+      },
+      "terminal": "2F",
+      "quality": [
+        "Basic",
+        "Live"
+      ]
+    },
+    "arrival": {
+      "airport": {
+        "icao": "LFMN",
+        "iata": "NCE",
+        "name": "Nice -Côte d'Azur",
+        "shortName": "-Côte d'Azur",
+        "municipalityName": "Nice",
+        "location": {
+          "lat": 43.6584,
+          "lon": 7.215869
+        },
+        "countryCode": "FR",
+        "timeZone": "Europe/Paris"
+      },
+      "scheduledTime": {
+        "utc": "2026-04-23 12:20Z",
+        "local": "2026-04-23 14:20+02:00"
+      },
+      "predictedTime": {
+        "utc": "2026-04-23 12:28Z",
+        "local": "2026-04-23 14:28+02:00"
+      },
+      "terminal": "2",
+      "quality": [
+        "Basic"
+      ]
+    },
+    "lastUpdatedUtc": "2026-04-15 07:00Z",
+    "number": "AF 7310",
+    "status": "Expected",
+    "codeshareStatus": "IsOperator",
+    "isCargo": false,
+    "aircraft": {
+      "model": "Airbus A321"
+    },
+    "airline": {
+      "name": "Air France",
+      "iata": "AF",
+      "icao": "AFR"
+    }
+  }
+]
