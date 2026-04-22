@@ -1,6 +1,6 @@
 ---
 title: PPML Mlflow
-emoji: ✈️
+emoji: 🗺️
 colorFrom: blue
 colorTo: gray
 sdk: docker
