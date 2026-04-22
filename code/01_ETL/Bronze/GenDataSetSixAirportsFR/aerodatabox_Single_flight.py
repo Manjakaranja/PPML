@@ -617,14 +617,25 @@ def main() -> int:
             print(f"[DEBUG] Longueur de la réponse brute : {len(response.text)}")
             print(f"[DEBUG] Réponse brute : {response.text}")
             api_error = True
+            # Écriture du code d'erreur dans API_Single_ERR.log
+            with open("API_Single_ERR.log", "a", encoding="utf-8") as ferr:
+                ferr.write(f"{datetime.now().isoformat()} | HTTP {response.status_code} | Erreur JSON: {json_exc}\n")
             data = []
             return 0
         print(f"[DEBUG] Réponse API : {str(data)[:500]}")
     except Exception as exc:
         print(f"Erreur lors de l'appel API : {exc}", file=sys.stderr)
+        # Récupération du code d'erreur si possible
+        err_code = None
+        err_text = None
         if hasattr(exc, 'response') and exc.response is not None:
-            print(f"[DEBUG] Réponse brute : {exc.response.text}")
+            err_code = getattr(exc.response, 'status_code', None)
+            err_text = getattr(exc.response, 'text', None)
+            print(f"[DEBUG] Réponse brute : {err_text}")
         api_error = True
+        # Écriture du code d'erreur dans API_Single_ERR.log
+        with open("API_Single_ERR.log", "a", encoding="utf-8") as ferr:
+            ferr.write(f"{datetime.now().isoformat()} | HTTP {err_code} | Exception: {exc}\n")
         data = []
         return 0
 
