@@ -17,7 +17,6 @@ __pycache__/
 *.zip
 data/
 donnees_*/
-data_*/
 *.joblib
 *.pkl
 
