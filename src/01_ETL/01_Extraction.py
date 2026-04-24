@@ -113,7 +113,7 @@ def charger_data_s3_parquet(
     return df
 
 
-# VERIFICATIONS
+# VÉRIFICATIONS
 
 def verifier_colonnes_minimales(df: pd.DataFrame) -> None:
     colonnes_attendues = [

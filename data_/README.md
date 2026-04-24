@@ -7,7 +7,7 @@ https://eu-north-1.console.aws.amazon.com/s3/buckets/
 /ppml-fastapi : contains the artifact store of our fastapi
 
 /ppml-mlflow : contains the artifact store of our mlflow
-
+f
 /ppml2026 : 
     
     - datasets/ : Contains the data used for the model training, eda and feature engineering (Signof...) and the standard file reference for the inference service (df_train...)

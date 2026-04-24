@@ -20,9 +20,9 @@ import boto3
 import pandas as pd
 
 
-
+# =========================================================
 # CONFIG
-
+# =========================================================
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 
@@ -35,9 +35,9 @@ S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "ppml2026")
 TRANSFORMED_S3_PREFIX = os.getenv("TRANSFORMED_S3_PREFIX", "processed")
 
 
-
+# =========================================================
 # HELPERS
-
+# =========================================================
 def get_s3_client():
     return boto3.client(
         "s3",
@@ -60,9 +60,9 @@ def build_s3_key(request_id: str, run_date: str) -> str:
     return f"{TRANSFORMED_S3_PREFIX}/{run_date}/{request_id}/{filename}"
 
 
-
+# =========================================================
 # LECTURE LOCALE
-
+# =========================================================
 def load_local_transformed_parquet(request_id: str) -> pd.DataFrame:
     local_path = build_local_output_path(request_id)
 
@@ -74,14 +74,14 @@ def load_local_transformed_parquet(request_id: str) -> pd.DataFrame:
     if df.empty:
         raise ValueError(f"Le parquet local est vide : {local_path}")
 
-    print(f"Parquet local chargé : {local_path}")
+    print(f"✅ Parquet local chargé : {local_path}")
     print(f"Format : {df.shape}")
     return df
 
 
-
+# =========================================================
 # UPLOAD S3
-
+# =========================================================
 def upload_local_parquet_to_s3(
     request_id: str,
     run_date: str,
@@ -96,13 +96,13 @@ def upload_local_parquet_to_s3(
     s3_key = build_s3_key(request_id=request_id, run_date=run_date)
     s3 = get_s3_client()
 
-    print(" Upload du parquet local vers S3")
+    print("📤 Upload du parquet local vers S3")
     print(f"   Local : {local_path}")
     print(f"   S3    : s3://{bucket_name}/{s3_key}")
 
     s3.upload_file(str(local_path), bucket_name, s3_key)
 
-    print("Upload S3 terminé avec succès")
+    print("✅ Upload S3 terminé avec succès")
 
     return {
         "status": "success",
@@ -115,9 +115,9 @@ def upload_local_parquet_to_s3(
     }
 
 
-
+# =========================================================
 # PIPELINE PRINCIPAL
-
+# =========================================================
 def load_single_flight_model_input_to_s3(
     request_id: str,
     run_date: str,
