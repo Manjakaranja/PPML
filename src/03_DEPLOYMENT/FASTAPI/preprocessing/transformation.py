@@ -23,29 +23,29 @@ from sklearn.preprocessing import OrdinalEncoder
 from preprocessing.extraction import extract_single_flight_dataset_from_s3
 
 
-# =========================================================
+
 # CONFIG
-# =========================================================
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# =========================================================
+
 # DIAGNOSTICS
-# =========================================================
+
 def check_missing(df: pd.DataFrame, name: str) -> None:
-    print(f"\n🔍 ANALYSE : {name}")
+    print(f"\n ANALYSE : {name}")
     stats = (df.isna().mean() * 100).sort_values(ascending=False)
     stats_filtered = stats[stats > 0]
     if not stats_filtered.empty:
         print(stats_filtered.head(30))
     else:
-        print("✅ Propre comme un sou neuf !")
+        print(" Propre comme un sou neuf !")
 
 
 def scan_total_vides(df: pd.DataFrame, name: str) -> None:
-    print(f"\n🕵️ SCAN COMPLET : {name}")
+    print(f"\n SCAN COMPLET : {name}")
     nans = df.isna().sum().sum()
     vides = (df == "").sum().sum()
     placeholders = ["none", "null", "unknown", "missing", "nan", "undefined"]
@@ -60,9 +60,9 @@ def scan_total_vides(df: pd.DataFrame, name: str) -> None:
     print(f"  - Valeurs infinies     : {infinites}")
 
 
-# =========================================================
+
 # RÉPARATION / HARMONISATION
-# =========================================================
+
 def reparer_vols_si_necessaire(df: pd.DataFrame) -> pd.DataFrame:
     """
     Si les lignes départ/arrivée sont encore séparées,
@@ -80,7 +80,7 @@ def reparer_vols_si_necessaire(df: pd.DataFrame) -> pd.DataFrame:
     }
 
     if not required_cols.issubset(df.columns):
-        print("ℹ️ Pas de réparation nécessaire : colonnes de fusion absentes.")
+        print("Pas de réparation nécessaire : colonnes de fusion absentes.")
         return df
 
     dates_cols = ["flight_date", "scheduled_departure", "scheduled_arrival"]
@@ -95,7 +95,7 @@ def reparer_vols_si_necessaire(df: pd.DataFrame) -> pd.DataFrame:
     vols_a_reparer = df[masque].copy()
 
     if vols_a_reparer.empty:
-        print("ℹ️ Aucun vol dupliqué à réparer.")
+        print("Aucun vol dupliqué à réparer.")
         return df
 
     dep = vols_a_reparer[vols_a_reparer["movement_type"] == "departure"].sort_values(
@@ -113,7 +113,7 @@ def reparer_vols_si_necessaire(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     df_final = pd.concat([vols_solo, df_reconstruit], ignore_index=True)
-    print(f"✅ Réparation vols effectuée : {df.shape} -> {df_final.shape}")
+    print(f" Réparation vols effectuée : {df.shape} -> {df_final.shape}")
     return df_final
 
 
@@ -137,15 +137,15 @@ def harmonize_columns(df: pd.DataFrame) -> pd.DataFrame:
         rename_map["status_dep"] = "status"
 
     if rename_map:
-        print(f"✅ Rename colonnes : {rename_map}")
+        print(f" Rename colonnes : {rename_map}")
         df = df.rename(columns=rename_map)
 
     return df
 
 
-# =========================================================
+
 # NETTOYAGE
-# =========================================================
+
 def purger_et_voir(df: pd.DataFrame, nom_dataset: str, seuil: float = 0.6) -> pd.DataFrame:
     print(f"\n--- 🗑️ NETTOYAGE : {nom_dataset} ---")
     colonnes_avant = set(df.columns)
@@ -173,19 +173,19 @@ def purger_et_voir(df: pd.DataFrame, nom_dataset: str, seuil: float = 0.6) -> pd
     df_final = df_filtre.drop(columns=cols_trop_vides)
 
     fantomes = colonnes_avant - set(cols_a_garder)
-    print(f"👻 {len(fantomes)} colonnes supprimées.")
-    print(f"🏜️ {len(cols_trop_vides)} colonnes > {seuil * 100:.0f}% vides supprimées.")
+    print(f" {len(fantomes)} colonnes supprimées.")
+    print(f" {len(cols_trop_vides)} colonnes > {seuil * 100:.0f}% vides supprimées.")
     print(
-        f"🛡️ Colonnes retard préservées : "
+        f" Colonnes retard préservées : "
         f"{[c for c in df_final.columns if any(mot in c.lower() for mot in mots_cles_proteges)]}"
     )
 
     return df_final.ffill().bfill()
 
 
-# =========================================================
+
 # FEATURE ENGINEERING
-# =========================================================
+
 DATETIME_COLS = [
     "flight_date",
     "scheduled_departure",
@@ -228,9 +228,9 @@ def encoder_categories(df: pd.DataFrame, encoder: OrdinalEncoder | None = None):
     return df, encoder
 
 
-# =========================================================
+
 # CIBLE
-# =========================================================
+
 def creer_cible_classification(df: pd.DataFrame, seuil_minutes: int = 15) -> pd.DataFrame:
     df = df.copy()
 
@@ -240,16 +240,16 @@ def creer_cible_classification(df: pd.DataFrame, seuil_minutes: int = 15) -> pd.
     )
 
     if nom_retard is None:
-        print("ℹ️ Pas de colonne arrival_delay_min -> cible classification non créée.")
+        print("Pas de colonne arrival_delay_min -> cible classification non créée.")
         return df
 
     df["retard arrivée"] = (df[nom_retard] > seuil_minutes).astype(int)
     return df
 
 
-# =========================================================
+
 # SAVE
-# =========================================================
+
 def build_output_name(request_id: str) -> str:
     return f"single_flight_model_input_{request_id}.parquet"
 
@@ -258,13 +258,13 @@ def save_transformed_parquet(df: pd.DataFrame, request_id: str) -> Path:
     output_name = build_output_name(request_id)
     output_path = DATA_DIR / output_name
     df.to_parquet(output_path, index=False)
-    print(f"✅ Parquet sauvegardé : {output_path}")
+    print(f" Parquet sauvegardé : {output_path}")
     return output_path
 
 
-# =========================================================
+
 # PIPELINE PRINCIPAL
-# =========================================================
+
 def transform_single_flight_dataset(
     request_id: str,
     run_date: str,
@@ -299,7 +299,7 @@ def transform_single_flight_dataset(
     if save_output:
         output_path = save_transformed_parquet(df, request_id=request_id)
 
-    print(f"\n✅ Dataset final transformé : {df.shape}")
+    print(f"\n Dataset final transformé : {df.shape}")
     return df, encoder, output_path
 
 
