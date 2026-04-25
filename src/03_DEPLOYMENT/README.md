@@ -1,77 +1,53 @@
-# 03_DEPLOYMENT — FastAPI, MLflow and Streamlit
+# 03_DEPLOYMENT — FlyOnTime production deployment
 
 This folder contains the deployment layer of the FlyOnTime project.
 
-It turns the data science work into a usable application.
-
-The deployment stack contains three main services, each deployed as a separate **Hugging Face Space**:
+The goal of this part is to turn the modeling work into a real user-facing application. Instead of keeping the project as notebooks only, the team deployed three independent services on Hugging Face Spaces:
 
 ```text
 03_DEPLOYMENT/
-├── FASTAPI/       # Backend API, orchestration and inference — Hugging Face Space
-├── MLFLOW/        # Model registry and experiment tracking — Hugging Face Space
-└── STREAMLIT/     # User-facing web application — Hugging Face Space
+├── FASTAPI/       # Backend API, orchestration and inference service
+├── MLFLOW/        # Remote experiment tracking server and model registry
+└── STREAMLIT/     # User-facing web application
 ```
 
-This separation is intentional. Streamlit, FastAPI and MLflow each have a different responsibility, so deploying them as three independent Spaces makes the project easier to maintain, debug and explain.
+Each service has its own Docker image, dependencies, runtime and environment variables. This separation makes the architecture easier to understand, maintain, debug and present.
 
 ---
 
-## Global deployment architecture
+## 1. Global architecture
 
 ```text
 User
  ↓
-Streamlit Hugging Face Space
+Streamlit Space
+ ↓ JSON request
+FastAPI Space
  ↓
-FastAPI Hugging Face Space
- ↓
-Single-flight lookup pipeline
+Single-flight lookup + API calls
  ↓
 ETL / feature preparation
  ↓
-MLflow Hugging Face Space / model registry
+MLflow Space / model registry
  ↓
-Classifier + Regressor
- ↓
-FastAPI response
- ↓
+XGBoost classifier + XGBoost regressor
+ ↓ JSON response
 Streamlit result display
 ```
 
+The frontend does not run machine learning models directly. It only collects and validates the user input. The backend handles orchestration, external API calls, feature preparation, model loading and prediction. MLflow centralizes the model versions and lets FastAPI load the promoted models by registry alias.
+
 ---
 
-# 1. FASTAPI
-
-## Deployment target
-
-FastAPI is deployed as a dedicated **Hugging Face Space**.
-
-Its role in production is to expose the backend API used by the Streamlit Space. It receives prediction requests, launches the flight lookup / ETL workflow, loads the promoted MLflow models and returns the final JSON response.
-
-Secrets such as AWS credentials, API keys and the MLflow tracking URI are configured as Hugging Face Space secrets, not committed to GitHub.
+# 2. FastAPI Space
 
 ## Role
 
-FastAPI is the backend of the application.
+FastAPI is the backend orchestration service.
 
-It is responsible for:
+It receives the request from Streamlit, launches the single-flight pipeline, prepares the features, loads the promoted XGBoost models from MLflow and returns the prediction response.
 
-- receiving the user request from Streamlit;
-- validating request fields;
-- normalizing flight number and airport values;
-- launching the single-flight lookup pipeline;
-- running the ETL transformation;
-- loading the MLflow models;
-- preparing model-compatible features;
-- running predictions;
-- returning a clean JSON response to Streamlit.
-
-FastAPI is the orchestrator between the user interface, the data pipeline and the machine learning models.
-
----
-
-## FASTAPI folder structure
+Current folder structure:
 
 ```text
 FASTAPI/
@@ -83,19 +59,57 @@ FASTAPI/
 └── README.md
 ```
 
-The important file is:
+Main responsibilities:
 
-```text
-app.py
-```
+- expose the prediction API;
+- normalize user inputs such as flight number and airport names;
+- launch the on-demand flight lookup pipeline;
+- read and transform the single-flight data;
+- upload raw and processed files to S3 when enabled;
+- align inference features with the training schema;
+- load XGBoost models from MLflow;
+- return user-readable predictions and error messages.
 
 ---
 
-## Main endpoints
+## FastAPI application
+
+The main application is:
+
+```text
+FASTAPI/app.py
+```
+
+The API is configured as:
+
+```python
+app = FastAPI(
+    title="FlyOnTime FastAPI",
+    description="API for flight delay prediction",
+    version="3.0.0"
+)
+```
+
+The backend currently uses XGBoost models registered in MLflow:
+
+```python
+CLASSIFIER_MODEL_URI = "models:/XGBoost_Classifier_registered@challenger"
+REGRESSOR_MODEL_URI = "models:/XGBoost_Regressor_registered@challenger"
+```
+
+This means FastAPI does not need model files manually copied into the API folder. It loads the promoted model versions from the MLflow registry.
+
+---
+
+## FastAPI endpoints
 
 ### `GET /`
 
-Redirects to the interactive API documentation.
+Redirects to the interactive FastAPI documentation:
+
+```text
+/docs
+```
 
 ### `GET /health`
 
@@ -112,48 +126,31 @@ Expected response:
 
 ### `GET /debug-models`
 
-Debug endpoint used to verify:
+Debug endpoint used during development to verify:
 
 - MLflow tracking URI;
 - classifier model URI;
 - regressor model URI;
-- reference dataset status;
-- model loader status;
-- flight lookup script existence.
+- reference dataset loading;
+- feature preprocessor status;
+- single-flight lookup script availability.
+
+This endpoint is useful for debugging but should be disabled or protected in a real production environment.
 
 ### `POST /predict`
 
-Main prediction endpoint.
+Main prediction endpoint used by Streamlit.
 
-It receives the flight request and returns the delay prediction.
-
----
-
-## Prediction request schema
-
-Example payload:
+Example request:
 
 ```json
 {
   "flight_number": "AF7300",
   "date": "2026-04-22T06:45:00",
-  "departure_airport": "CDG",
-  "arrival_airport": "NCE"
+  "departure_airport": "CDG - Paris Charles de Gaulle",
+  "arrival_airport": "NCE - Nice Côte d'Azur"
 }
 ```
-
-Fields:
-
-| Field | Type | Description |
-|---|---|---|
-| `flight_number` | string | Flight number entered by the user |
-| `date` | string | Date and time selected by the user |
-| `departure_airport` | string | Departure airport code or label |
-| `arrival_airport` | string, optional | Arrival airport code or label |
-
----
-
-## Prediction response schema
 
 Example response:
 
@@ -172,172 +169,173 @@ Example response:
 }
 ```
 
-Fields:
-
-| Field | Description |
-|---|---|
-| `status` | Request status |
-| `delay_probability` | Probability of arrival delay |
-| `predicted_arrival_delay_minutes` | Estimated arrival delay in minutes |
-| `is_delayed` | Boolean classification output |
-| `message` | User-readable message |
-| `warning_message` | Optional warning, for example codeshare |
-
 ---
 
 ## FastAPI internal workflow
 
-When `/predict` is called, FastAPI performs the following steps:
+When `/predict` is called, FastAPI executes the following workflow:
 
 ```text
-1. Receive Streamlit payload
+1. Receive the Streamlit payload
 2. Normalize flight number and airport values
-3. Run GlobalRunSingleFlight.py
-4. Recover request_id from pipeline stdout
-5. Read flight_request_status.json
-6. Run transformation pipeline
-7. Upload processed parquet to S3
-8. Select the correct flight row
-9. Align features with the reference training schema
-10. Load classifier and regressor from MLflow
-11. Run classifier prediction
-12. Run regressor prediction
-13. Return response to Streamlit
+3. Launch GlobalRunSingleFlight.py
+4. Recover request_id from the pipeline stdout
+5. Read flight_request_status.json if generated
+6. Run the single-flight transformation pipeline
+7. Upload the processed parquet to S3
+8. Select the matching single-flight row
+9. Build a base row from the reference training dataframe
+10. Apply classifier-specific preprocessing
+11. Apply regressor-specific preprocessing
+12. Load the XGBoost classifier and regressor from MLflow
+13. Run classifier prediction
+14. Run regressor prediction
+15. Return the final JSON response to Streamlit
 ```
 
 ---
 
-## Model loading
+## Feature preparation for inference
 
-FastAPI loads the models from MLflow using registered model URIs.
-
-Example:
-
-```python
-CLASSIFIER_MODEL_URI = "models:/RandomForest_Classifier_registered@challenger"
-REGRESSOR_MODEL_URI = "models:/RandomForest_Regressor_registered@challenger"
-```
-
-In the final XGBoost direction, the same principle applies with XGBoost registered models and the `challenger` alias.
-
-This allows the backend to use the model currently promoted in MLflow without manually copying model files into the API container.
-
----
-
-## Feature preparation
-
-The backend prepares features by:
-
-- starting from a reference dataframe;
-- replacing matching columns with the real single-flight ETL data;
-- harmonizing column names;
-- extracting datetime features;
-- removing unavailable target columns;
-- keeping the schema aligned with the training data.
-
-This is critical because model inference will fail if training and production columns are not aligned.
-
----
-
-## Error handling
-
-FastAPI translates technical pipeline failures into human-readable messages.
-
-Examples:
+FastAPI uses a reference dataframe:
 
 ```text
-Vol introuvable. Veuillez vérifier le numéro de vol, la date, l’horaire et l’aéroport de départ.
-Le service de recherche de vol est momentanément indisponible. Merci de réessayer dans quelques instants.
-Une erreur technique est survenue pendant la prédiction. Merci de réessayer.
+data/df_train_final.parquet
 ```
 
-This avoids exposing raw Python or API errors to the final user.
+This file is important because it preserves the training schema after feature engineering. During inference, the backend starts from a reference row, replaces the values available from the real single-flight ETL output, then applies notebook-compatible preprocessing.
+
+The production preprocessing includes:
+
+- preserving the training feature schema;
+- aligning column names such as scheduled departure / arrival columns;
+- extracting datetime features;
+- encoding categorical variables with `OrdinalEncoder`;
+- imputing numerical missing values with training medians;
+- creating one prepared input for the classifier;
+- creating one prepared input for the regressor.
+
+This is critical because the XGBoost models expect the same feature order and feature names used during training.
 
 ---
 
-## Run FastAPI locally
+## FastAPI Docker deployment
+
+FastAPI is deployed on Hugging Face Spaces with Docker.
+
+The Dockerfile:
+
+- starts from `python:3.11-slim`;
+- installs system packages such as `curl` and `nano`;
+- creates the Hugging Face `user` account;
+- copies the FastAPI project into `/home/user/app`;
+- installs dependencies from `requirements.txt`;
+- exposes port `7860`;
+- starts the app with `uvicorn`.
+
+Runtime command:
 
 ```bash
-cd src/03_DEPLOYMENT/FASTAPI
-uvicorn app:app --host 0.0.0.0 --port 7860
-```
-
-Then open:
-
-```text
-http://localhost:7860/docs
+uvicorn app:app --host 0.0.0.0 --port ${PORT:-7860}
 ```
 
 ---
 
-## Hugging Face variables and secrets — FastAPI Space
+## FastAPI dependencies
 
-The FastAPI Space uses both **public variables** and **private secrets** configured from the Hugging Face Space settings panel.
+The main dependencies are declared in:
 
-Public variables used in the project:
+```text
+FASTAPI/requirements.txt
+```
+
+They include:
+
+- `fastapi`
+- `uvicorn[standard]`
+- `pandas`
+- `pyarrow`
+- `mlflow`
+- `scikit-learn`
+- `requests`
+- `boto3`
+- `python-dotenv`
+
+These dependencies support API serving, parquet reading, MLflow model loading, S3 communication and preprocessing.
+
+---
+
+## FastAPI environment variables and secrets
+
+FastAPI uses both public variables and private secrets from the Hugging Face Space settings.
+
+### Public variables
 
 | Variable | Purpose |
 |---|---|
-| `PORT` | Runtime port used by the Hugging Face Space container |
-| `BUCKET_EQUIPE` | Team bucket reference used by the project configuration |
-| `ENABLE_S3_UPLOAD` | Enables upload of request outputs and logs to S3 when set to `1` |
-| `S3_BUCKET_NAME` | Main S3 bucket name, for example `ppml2026` |
-| `S3_PREFIX` | S3 prefix used for raw pipeline outputs, for example `raw` |
+| `PORT` | Runtime port used by Hugging Face Spaces. Usually `7860`. |
+| `BUCKET_EQUIPE` | Team bucket reference used in the project configuration. |
+| `ENABLE_S3_UPLOAD` | Enables or disables S3 upload for request outputs and logs. Use `1` to enable. |
+| `S3_BUCKET_NAME` | Main S3 bucket name, for example `ppml2026`. |
+| `S3_PREFIX` | Prefix used for raw pipeline outputs, for example `raw`. |
 
-Private secrets used in the project:
+### Private secrets
 
 | Secret | Purpose |
 |---|---|
-| `MLFLOW_TRACKING_URI` | URL of the deployed MLflow Hugging Face Space used by FastAPI to load registered models |
-| `BACKEND_STORE_URI` | Database URI used by MLflow metadata / tracking configuration when needed |
-| `ARTIFACT_STORE_URI` | S3 artifact storage URI used by the MLflow setup |
-| `AWS_ACCESS_KEY_ID` | AWS access key used by FastAPI to read/write S3 objects |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key used by FastAPI to access S3 |
-| `AWS_DEFAULT_REGION` | AWS region of the S3 bucket |
-| `API_KEY` | External API key used to call the flight data provider |
-| `API_KEY_NAME` | API key name / provider identifier used by the API integration |
+| `MLFLOW_TRACKING_URI` | URL of the deployed MLflow Space used to load registered models. |
+| `BACKEND_STORE_URI` | Remote backend store URI, kept when MLflow-related config is needed. |
+| `ARTIFACT_STORE_URI` | S3 artifact storage URI used by the MLflow setup. |
+| `AWS_ACCESS_KEY_ID` | AWS access key used to read/write S3 objects. |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key used to access S3. |
+| `AWS_DEFAULT_REGION` | AWS region of the S3 bucket. |
+| `API_KEY` | External API key used for flight data calls. |
+| `API_KEY_NAME` | API provider identifier / key name. |
 
-These values are not hardcoded in the repository. They are injected at runtime by Hugging Face Spaces.
----
-
-# 2. MLFLOW
-
-## Deployment target
-
-MLflow is deployed as a dedicated **Hugging Face Space**.
-
-This Space acts as the remote experiment tracking server and model registry used by both the modeling notebooks and the FastAPI backend.
-
-The notebooks log experiments to this MLflow Space, and FastAPI later loads the promoted model versions from the same tracking server.
-
-## Role
-
-MLflow is used for model tracking and model registry.
-
-It stores:
-
-- experiments;
-- model parameters;
-- model metrics;
-- model artifacts;
-- registered models;
-- model aliases.
-
-In this project, MLflow is the bridge between modeling and deployment.
+The code also supports a fallback from `AWS_ACCESS_KEY` to `AWS_ACCESS_KEY_ID`, but the preferred clean naming is:
 
 ```text
-Notebook training
-        ↓
-MLflow experiment tracking
-        ↓
-Registered model
-        ↓
-FastAPI model loading
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+AWS_DEFAULT_REGION
 ```
 
 ---
 
-## MLFLOW folder structure
+# 3. MLflow Space
+
+## Role
+
+MLflow is the remote experiment tracking server and model registry.
+
+It connects the modeling phase to deployment:
+
+```text
+Training scripts / notebooks
+ ↓
+MLflow experiments
+ ↓
+Registered models
+ ↓
+Model alias: challenger
+ ↓
+FastAPI loads the promoted models
+```
+
+MLflow stores:
+
+- experiment runs;
+- model parameters;
+- metrics;
+- artifacts;
+- registered model versions;
+- model aliases.
+
+In this project, the promoted models are loaded by FastAPI through the `challenger` alias.
+
+---
+
+## MLflow folder structure
 
 ```text
 MLFLOW/
@@ -346,164 +344,195 @@ MLFLOW/
 └── README.md
 ```
 
-The MLflow service is deployed as a Hugging Face Space. In this project, this is what allows the team to avoid storing model binaries directly inside the FastAPI or Streamlit applications.
+---
+
+## MLflow Docker deployment
+
+MLflow is deployed as a dedicated Hugging Face Docker Space.
+
+The Dockerfile:
+
+- starts from `continuumio/miniconda3`;
+- installs system dependencies and AWS CLI;
+- creates the Hugging Face `user` account;
+- installs Python dependencies from `requirements.txt`;
+- starts an MLflow server.
+
+Runtime command:
+
+```bash
+mlflow server -p $PORT \
+  --host 0.0.0.0 \
+  --backend-store-uri $BACKEND_STORE_URI \
+  --default-artifact-root $ARTIFACT_STORE_URI \
+  --x-frame-options NONE \
+  --allowed-hosts '*' \
+  --cors-allowed-origins '*'
+```
+
+The backend store contains MLflow metadata. The artifact store contains model files and other run artifacts.
 
 ---
 
-## Why MLflow is useful here
+## MLflow dependencies
 
-Without MLflow, FastAPI would need to load local model files manually.
+The MLflow Space dependencies include:
 
-With MLflow:
+- `mlflow==3.5.0`
+- `scikit-learn==1.6.1`
+- `pandas`
+- `numpy`
+- `psycopg2-binary`
+- `boto3`
+- `matplotlib`
+- `seaborn`
+- `plotly`
 
-- models are versioned;
-- metrics are preserved;
-- experiments can be compared;
-- the API can load a model by registry alias;
-- model promotion becomes easier.
-
-Typical lifecycle:
-
-```text
-Experiment run → Register model → Assign alias → FastAPI loads alias
-```
-
-Example alias:
-
-```text
-challenger
-```
+`psycopg2-binary` is used for a SQL backend store, while `boto3` allows MLflow to access the S3 artifact store.
 
 ---
 
-## Hugging Face variables and secrets — MLflow Space
+## MLflow environment variables and secrets
 
-The MLflow server is also deployed as a dedicated Hugging Face Space. Its variables and secrets are separated from FastAPI because MLflow has its own runtime and storage configuration.
-
-Public variable used in the MLflow Space:
+### Public variables
 
 | Variable | Purpose |
 |---|---|
-| `PORT` | Runtime port used by the Hugging Face Space container |
+| `PORT` | Runtime port used by the Hugging Face Space. |
 
-Private secrets used in the MLflow Space:
+### Private secrets
 
 | Secret | Purpose |
 |---|---|
-| `BACKEND_STORE_URI` | Remote database URI used by MLflow to store experiments, runs, metrics, parameters and model registry metadata |
-| `ARTIFACT_STORE_URI` | S3 location used to store MLflow artifacts and model files |
-| `AWS_ACCESS_KEY_ID` | AWS access key used by MLflow to access the S3 artifact store |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key used by MLflow to access S3 |
-| `AWS_ACCESS_KEY` | Legacy or alternative AWS access key name kept for compatibility with some scripts/configurations |
-| `AWS_SECRET_ACCESS_KEY_ID` | Legacy or alternative secret name visible in the current Space configuration |
+| `BACKEND_STORE_URI` | Remote database URI used to store experiments, runs, metrics, parameters and registry metadata. |
+| `ARTIFACT_STORE_URI` | Default artifact root, usually an S3 URI. |
+| `AWS_ACCESS_KEY_ID` | AWS access key used to access the artifact store. |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key used to access S3. |
+| `AWS_ACCESS_KEY` | Legacy / alternative access key name visible in the Space configuration. |
+| `AWS_SECRET_ACCESS_KEY_ID` | Legacy / alternative secret name visible in the Space configuration. |
 
-For a cleaner production setup, the preferred AWS variable names are `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Extra legacy names should only be kept if one of the existing scripts or Docker commands still depends on them.
-In the project architecture:
-
-- the MLflow server runs on Hugging Face Spaces;
-- the backend store can be a remote SQL database;
-- model artifacts can be stored in S3;
-- FastAPI connects to the MLflow Space through `MLFLOW_TRACKING_URI`;
-- notebooks also use the same `MLFLOW_TRACKING_URI` to log and register models.
+For a cleaner production configuration, the preferred AWS names are `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Legacy names should only remain if the current Docker image or older scripts still depend on them.
 
 ---
 
-# 3. STREAMLIT
-
-## Deployment target
-
-Streamlit is deployed as a dedicated **Hugging Face Space**.
-
-This Space is the public-facing application. It does not run the models directly. Instead, it validates the user input, sends the request to the FastAPI Space, waits for the backend response, and displays the result in a user-friendly way.
+# 4. Streamlit Space
 
 ## Role
 
-Streamlit is the user-facing web application.
+Streamlit is the public-facing web application.
 
 It allows a passenger to:
 
 - enter a flight number;
-- choose a flight date and time;
-- choose departure and arrival airports;
+- choose the flight date and departure time;
+- select departure and arrival airports;
 - submit the request;
-- view the prediction returned by FastAPI.
+- view the delay prediction returned by FastAPI.
 
-The app is designed with an aviation-themed UI and visual consistency with the project presentation.
+Streamlit does not run MLflow or XGBoost directly. It communicates with the FastAPI Space through an HTTP POST request.
 
 ---
 
-## STREAMLIT folder structure
+## Streamlit folder structure
 
 ```text
 STREAMLIT/
 ├── app.py
-├── requirements.txt
 ├── Dockerfile
+├── requirements.txt
 ├── anims/
-│   ├── plane.json
-│   └── loader_plane.json
 └── README.md
 ```
 
+The `anims/` folder contains Lottie JSON animations used in the interface.
+
 ---
 
-## User input validation
+## Streamlit application behavior
 
-Before calling FastAPI, Streamlit validates the form inputs.
+The main application is:
 
-Validation includes:
+```text
+STREAMLIT/app.py
+```
 
-- flight number format;
-- date and time input through dedicated widgets;
-- departure airport selection;
-- arrival airport selection;
-- check that arrival airport is different from departure airport.
+Current FastAPI target:
 
-This avoids unnecessary backend calls and improves user experience.
+```python
+API_BASE = "https://ppml2026-ppml-fastapi.hf.space"
+API_URL = f"{API_BASE}/predict"
+```
+
+The app provides:
+
+- an aviation-themed user interface;
+- Lottie animations for the sidebar and loading state;
+- a flight search form;
+- client-side validation before calling FastAPI;
+- a loading animation while the backend runs the prediction;
+- metric cards for delay and risk level;
+- an expandable section with full flight details.
+
+---
+
+## Streamlit input validation
+
+Before calling FastAPI, Streamlit validates:
+
+- the flight number format, for example `AF1234` or `BA 456`;
+- the date and time selected by the user;
+- the departure airport;
+- the arrival airport;
+- the rule that departure and arrival airports must be different.
+
+This avoids unnecessary backend calls and improves the user experience.
 
 ---
 
 ## Payload sent to FastAPI
 
-Streamlit sends a JSON payload like:
+Streamlit sends a JSON payload to FastAPI:
 
 ```json
 {
   "flight_number": "AF7300",
   "date": "2026-04-22T06:45:00",
-  "departure_airport": "CDG",
-  "arrival_airport": "NCE"
+  "departure_airport": "CDG - Paris Charles de Gaulle",
+  "arrival_airport": "NCE - Nice Côte d'Azur"
 }
 ```
 
-The backend expects the same fields in the `POST /predict` endpoint.
+The backend then normalizes the airport labels and uses only the code needed by the pipeline.
 
 ---
 
-## Result display
+## Streamlit result display
 
-Streamlit displays:
+After receiving the FastAPI response, Streamlit displays:
 
-- predicted arrival delay in minutes;
+- estimated arrival delay in minutes;
 - delay probability;
 - risk level;
-- short interpretation text;
-- optional warning messages;
-- backend error messages in user-friendly wording.
+- interpreted result message;
+- complete flight details inside an expandable section.
 
-Risk levels can be displayed visually:
+Risk interpretation example:
 
-| Risk level | Interpretation |
-|---|---|
-| Low | Flight appears likely to be on time |
-| Medium | Some delay risk exists |
-| High | Delay risk is significant |
+| Delay estimate | Risk level | Interpretation |
+|---:|---|---|
+| `< 30 min` | Low | Flight appears likely to be on time or lightly delayed. |
+| `30–59 min` | Medium | Some delay risk exists. |
+| `>= 60 min` | High | The passenger should anticipate a significant delay. |
+
+The current UI also contains a visual section for probable delay causes. At MVP stage, these causes are still mocked / illustrative. A future improvement would be to connect this section to SHAP explanations or feature contributions from the backend.
 
 ---
 
-## Error messages shown to users
+## Streamlit error handling
 
-Streamlit should display backend errors in a clear form, for example:
+Streamlit catches API call failures and displays a user-facing error message.
+
+Typical cases:
 
 ```text
 Flight not found. Please verify your details.
@@ -512,111 +541,116 @@ The service is taking too long to respond. Please try again shortly.
 Unable to reach the prediction service right now. Please try again later.
 ```
 
-The purpose is to keep the UI clean and understandable even when the API or external flight data service fails.
+The goal is to avoid exposing raw backend errors to the final user.
 
 ---
 
-## Lottie animations
+## Streamlit Docker deployment
 
-The Streamlit UI uses Lottie animations.
+Streamlit is deployed on Hugging Face Spaces with Docker.
 
-A Lottie animation is a lightweight animation stored as a JSON file.
+The Dockerfile:
 
-In this project:
+- starts from `continuumio/miniconda3`;
+- installs basic system packages;
+- creates the Hugging Face `user` account;
+- installs dependencies from `requirements.txt`;
+- copies the app files into `/home/user/app`;
+- exposes port `7860`;
+- starts Streamlit.
 
-```text
-anims/plane.json
-anims/loader_plane.json
+Runtime command:
+
+```bash
+streamlit run app.py --server.port=7860
 ```
 
-These animations support the aviation theme and make the app feel more polished.
+---
+
+## Streamlit dependencies
+
+The Streamlit dependencies are:
+
+- `streamlit`
+- `pandas`
+- `plotly`
+- `streamlit_lottie`
+
+These cover the web UI, input handling, visual components and animations.
 
 ---
 
-## Hugging Face variables and secrets — Streamlit Space
+## Streamlit environment variables and secrets
 
-The Streamlit Space is lighter than FastAPI and MLflow. It mainly needs to know where the FastAPI backend is deployed.
+The current `app.py` hardcodes the FastAPI endpoint:
 
-Typical variables:
+```python
+API_BASE = "https://ppml2026-ppml-fastapi.hf.space"
+```
+
+For a cleaner production setup, this should ideally be moved to a Hugging Face variable:
 
 | Variable | Purpose |
 |---|---|
-| `API_URL` or `API_BASE` | URL of the deployed FastAPI Hugging Face Space prediction endpoint |
-| `PORT` | Runtime port used by the Hugging Face Space container, if required by the Space configuration |
+| `API_BASE` | Base URL of the deployed FastAPI Space. |
+| `API_URL` | Full prediction endpoint. Usually `${API_BASE}/predict`. |
+| `PORT` | Runtime port used by Hugging Face Spaces, usually `7860`. |
 
-Streamlit should not contain AWS credentials or MLflow credentials. It should only communicate with FastAPI. This keeps the frontend simple and safer.
+Streamlit should not contain AWS credentials, MLflow credentials or external API keys. Those belong to FastAPI and MLflow only.
 
 ---
 
-## Run Streamlit locally
+# 5. End-to-end test
 
-```bash
-cd src/03_DEPLOYMENT/STREAMLIT
-streamlit run app.py
+A typical manual test is:
+
+```text
+1. Verify that the MLflow Space is running.
+2. Verify that the promoted XGBoost models exist with the challenger alias.
+3. Start or restart the FastAPI Space.
+4. Open FastAPI /docs.
+5. Test GET /health.
+6. Test GET /debug-models.
+7. Test POST /predict with a known flight payload.
+8. Open the Streamlit Space.
+9. Submit the same flight from the web form.
+10. Verify that Streamlit displays the FastAPI prediction.
 ```
 
-Make sure the FastAPI backend URL is correctly configured in `app.py`. In production, this URL points to the deployed FastAPI Hugging Face Space.
-
 ---
 
-# Deployment notes
+# 6. Production-oriented recommendations
 
-## Hugging Face Spaces
-
-The three services are deployed on Hugging Face Spaces:
-
-- one Space for **FastAPI**: backend orchestration and inference API;
-- one Space for **Streamlit**: user-facing web application;
-- one Space for **MLflow**: experiment tracking and model registry.
-
-Each service has its own runtime and secrets. This is closer to a production architecture than putting everything into one monolithic app.
-
-Secrets should be configured in Hugging Face, not committed to GitHub. In this project, each Space has its own environment variables: FastAPI has API/S3/MLflow access, MLflow has database/S3 artifact access, and Streamlit mainly needs the FastAPI endpoint URL.
-
----
-
-## Production-oriented recommendations
-
-For a cleaner production setup:
+For a more production-ready architecture:
 
 - keep all secrets in Hugging Face Spaces secrets;
 - never commit `.env` files;
-- use `/health` for monitoring FastAPI;
-- keep `/debug-models` private or disable it in production;
-- add timeout handling in Streamlit;
-- add schema validation tests between ETL and model inputs;
-- track every user request with a unique `request_id`;
-- store logs in S3 for auditability;
-- use MLflow aliases to control model promotion.
+- keep `API_KEY`, AWS credentials and database URLs private;
+- move the Streamlit FastAPI URL to an environment variable;
+- protect or disable `/debug-models` in production;
+- keep `/health` available for monitoring;
+- store request logs in S3 using the generated `request_id`;
+- keep using MLflow aliases for model promotion;
+- add schema validation tests between ETL output and model input;
+- add automated tests for the `/predict` endpoint;
+- replace mocked delay causes in Streamlit with SHAP-based explanations when available.
 
 ---
 
-## End-to-end test
+# 7. Why this deployment matters
 
-A typical manual test:
+This deployment is not just a notebook export.
 
-1. Start MLflow or make sure the remote MLflow server is available.
-2. Start FastAPI.
-3. Open `/docs`.
-4. Test `/health`.
-5. Test `/predict` with a known flight payload.
-6. Start Streamlit.
-7. Submit the same flight from the UI.
-8. Verify that Streamlit receives and displays the FastAPI response.
-
----
-
-## Why this deployment design matters
-
-The deployment is not a simple notebook export.  
-It is an application pipeline with:
+It demonstrates a complete machine learning application workflow:
 
 - frontend validation;
-- backend orchestration;
-- external API dependency handling;
-- cloud storage;
-- model registry;
-- inference schema alignment;
-- user-facing error handling.
+- backend API orchestration;
+- external flight data integration;
+- S3 storage;
+- feature engineering for inference;
+- model registry usage;
+- XGBoost model serving;
+- user-facing error handling;
+- independent services deployed on Hugging Face Spaces.
 
-This makes the project closer to a real-world machine learning product.
+This makes FlyOnTime closer to a real-world machine learning product than a simple classroom notebook.
