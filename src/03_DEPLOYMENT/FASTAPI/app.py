@@ -8,31 +8,35 @@ import os
 import sys
 import subprocess
 import re
+import json
 from pathlib import Path
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 import mlflow
-import mlflow.pyfunc
-import mlflow.sklearn
+import mlflow.xgboost
 from pandas.api.types import is_datetime64_any_dtype
+from sklearn.preprocessing import OrdinalEncoder
 
 from preprocessing.transformation import transform_single_flight_dataset
 from preprocessing.load import load_single_flight_model_input_to_s3
 
 
+# =========================================================
 # LOGGING
-
+# =========================================================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
 # APP
-
+# =========================================================
 app = FastAPI(
     title="FlyOnTime FastAPI",
     description="API for flight delay prediction",
-    version="2.0.0"
+    version="3.0.0"
 )
 
 app.add_middleware(
@@ -44,8 +48,9 @@ app.add_middleware(
 )
 
 
+# =========================================================
 # CONFIG
-
+# =========================================================
 BASE_DIR = Path(__file__).resolve().parent
 
 MLFLOW_TRACKING_URI = os.getenv(
@@ -53,22 +58,22 @@ MLFLOW_TRACKING_URI = os.getenv(
     "https://ppml2026-ppml-mlflow.hf.space"
 )
 
-CLASSIFIER_MODEL_URI = "models:/RandomForest_Classifier_registered@challenger"
-REGRESSOR_MODEL_URI = "models:/RandomForest_Regressor_registered@challenger"
+CLASSIFIER_MODEL_URI = "models:/XGBoost_Classifier_registered@challenger"
+REGRESSOR_MODEL_URI = "models:/XGBoost_Regressor_registered@challenger"
 
-REGRESSOR_LOADER = "pyfunc"
-
-TEST_DATA_PATH = BASE_DIR / "data" / "df_1_train_cleaned.parquet"
+TEST_DATA_PATH = BASE_DIR / "data" / "df_train_final.parquet"
 TEST_ROW_INDEX = 0
 
 FLIGHT_LOOKUP_DIR = BASE_DIR / "flight_lookup"
 GLOBAL_RUN_SINGLE_FLIGHT_PATH = FLIGHT_LOOKUP_DIR / "GlobalRunSingleFlight.py"
+OUTPUT_ROOT = FLIGHT_LOOKUP_DIR / "output"
 
 ENABLE_S3_UPLOAD = os.getenv("ENABLE_S3_UPLOAD", "0")
 
 
+# =========================================================
 # AWS / HF SECRETS MAPPING
-
+# =========================================================
 aws_key = os.getenv("AWS_ACCESS_KEY_ID") or os.getenv("AWS_ACCESS_KEY")
 aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY")
 aws_region = os.getenv("AWS_DEFAULT_REGION", "eu-north-1")
@@ -88,20 +93,49 @@ logger.info("MLFLOW_TRACKING_URI present: %s", bool(os.getenv("MLFLOW_TRACKING_U
 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
 
-# GLOBAL OBJECTS
+# =========================================================
+# CONSTANTES PREPROCESSING XGBOOST
+# =========================================================
+COLS_A_VIRER_CLASSIFIER = [
+    "departure_delay_min",
+    "arrival_delay_min",
+    "time_dep",
+    "time_arr",
+]
 
+COLS_A_VIRER_REGRESSOR = [
+    "departure_delay_min",
+    "arrival_delay_min",
+    "time_dep",
+    "time_arr",
+]
+
+DATETIME_COLS_NOTEBOOK = [
+    "flight_date",
+    "scheduled_departure_dep",
+    "scheduled_arrival_arr",
+]
+
+
+# =========================================================
+# GLOBAL OBJECTS
+# =========================================================
 classifier_model = None
 regressor_model = None
 df_reference = None
 
+clf_preprocessor = None
+reg_preprocessor = None
 
+
+# =========================================================
 # REQUEST / RESPONSE
-
+# =========================================================
 class PredictionRequest(BaseModel):
     flight_number: str = Field(..., example="AF1234")
     date: str = Field(..., example="2026-04-20T14:30:00")
     departure_airport: str = Field(..., example="CDG - Paris Charles de Gaulle")
-    arrival_airport: str = Field(..., example="CDG - Paris Charles de Gaulle")
+    arrival_airport: Optional[str] = Field(None, example="NCE - Nice Côte d'Azur")
 
 
 class PredictionResponse(BaseModel):
@@ -114,11 +148,13 @@ class PredictionResponse(BaseModel):
     predicted_arrival_delay_minutes: Optional[float] = None
     is_delayed: Optional[bool] = None
     message: Optional[str] = None
+    warning_message: Optional[str] = None
 
 
-# HELPERS
-
-def normalize_departure_airport(user_value: str) -> str:
+# =========================================================
+# HELPERS GÉNÉRAUX
+# =========================================================
+def normalize_departure_airport(user_value: Optional[str]) -> Optional[str]:
     if not user_value:
         return user_value
 
@@ -140,6 +176,39 @@ def extract_request_id_from_stdout(stdout: str) -> str:
     if not match:
         raise ValueError("Impossible de récupérer REQUEST_ID depuis le stdout du pipeline")
     return match.group(1).strip()
+
+
+def get_request_dir(request_id: str) -> Path:
+    return OUTPUT_ROOT / request_id
+
+
+def get_request_status_path(request_id: str) -> Path:
+    return get_request_dir(request_id) / "flight_request_status.json"
+
+
+def get_request_error_log_path(request_id: str) -> Path:
+    return get_request_dir(request_id) / "API_Single_ERR.log"
+
+
+def read_request_status(request_id: str) -> dict:
+    status_path = get_request_status_path(request_id)
+    if not status_path.exists():
+        return {}
+
+    with open(status_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def build_user_friendly_pipeline_error(request_id: str, fallback_message: str) -> str:
+    status_payload = read_request_status(request_id)
+    if status_payload and status_payload.get("user_message"):
+        return status_payload["user_message"]
+
+    log_path = get_request_error_log_path(request_id)
+    if log_path.exists():
+        return fallback_message
+
+    return fallback_message
 
 
 def load_reference_dataframe() -> pd.DataFrame:
@@ -164,20 +233,39 @@ def load_reference_dataframe() -> pd.DataFrame:
 
 def get_reference_row(df: pd.DataFrame, row_index: int) -> pd.DataFrame:
     if row_index < 0 or row_index >= len(df):
-        raise IndexError(
-            f"TEST_ROW_INDEX={row_index} is out of bounds for dataframe of length {len(df)}"
-        )
+        raise IndexError(f"TEST_ROW_INDEX={row_index} is out of bounds for dataframe of length {len(df)}")
     return df.iloc[[row_index]].copy()
 
 
-def add_datetime_features_safe(df: pd.DataFrame, datetime_cols: list[str]) -> pd.DataFrame:
+def align_single_row_columns(df_single: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sécurise les noms pour rester cohérent avec le training notebook.
+    On garde scheduled_departure_dep / scheduled_arrival_arr.
+    """
+    df_single = df_single.copy()
+
+    if "scheduled_departure_dep" not in df_single.columns and "scheduled_departure" in df_single.columns:
+        df_single["scheduled_departure_dep"] = df_single["scheduled_departure"]
+
+    if "scheduled_arrival_arr" not in df_single.columns and "scheduled_arrival" in df_single.columns:
+        df_single["scheduled_arrival_arr"] = df_single["scheduled_arrival"]
+
+    if "movement_date" not in df_single.columns and "movement_date_dep" in df_single.columns:
+        df_single["movement_date"] = df_single["movement_date_dep"]
+
+    if "status" not in df_single.columns and "status_dep" in df_single.columns:
+        df_single["status"] = df_single["status_dep"]
+
+    return df_single
+
+
+def datetime_clean_like_notebook(df: pd.DataFrame, datetime_cols: list[str]) -> pd.DataFrame:
     df = df.copy()
     bad_datetime_cols = []
 
     for col in datetime_cols:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
-
             if not is_datetime64_any_dtype(df[col]):
                 bad_datetime_cols.append(col)
 
@@ -191,13 +279,13 @@ def add_datetime_features_safe(df: pd.DataFrame, datetime_cols: list[str]) -> pd
         df["flight_day"] = df["flight_date"].dt.day
         df["flight_dayofweek"] = df["flight_date"].dt.dayofweek
 
-    if "scheduled_departure" in usable_datetime_cols:
-        df["sched_dep_hour"] = df["scheduled_departure"].dt.hour
-        df["sched_dep_minute"] = df["scheduled_departure"].dt.minute
+    if "scheduled_departure_dep" in usable_datetime_cols:
+        df["sched_dep_hour"] = df["scheduled_departure_dep"].dt.hour
+        df["sched_dep_minute"] = df["scheduled_departure_dep"].dt.minute
 
-    if "scheduled_arrival" in usable_datetime_cols:
-        df["sched_arr_hour"] = df["scheduled_arrival"].dt.hour
-        df["sched_arr_minute"] = df["scheduled_arrival"].dt.minute
+    if "scheduled_arrival_arr" in usable_datetime_cols:
+        df["sched_arr_hour"] = df["scheduled_arrival_arr"].dt.hour
+        df["sched_arr_minute"] = df["scheduled_arrival_arr"].dt.minute
 
     logger.info("Colonnes datetime problématiques droppées : %s", bad_datetime_cols)
 
@@ -205,27 +293,146 @@ def add_datetime_features_safe(df: pd.DataFrame, datetime_cols: list[str]) -> pd
     return df
 
 
-def harmonize_columns_for_model_input(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    rename_map = {}
+def build_training_frame_for_classifier(df_ref: pd.DataFrame) -> pd.DataFrame:
+    X = df_ref.drop(
+        columns=COLS_A_VIRER_CLASSIFIER + ["retard_arrivee"],
+        errors="ignore",
+    ).copy()
+    X = datetime_clean_like_notebook(X, DATETIME_COLS_NOTEBOOK)
+    return X
 
-    if "scheduled_departure_dep" in df.columns and "scheduled_departure" not in df.columns:
-        rename_map["scheduled_departure_dep"] = "scheduled_departure"
 
-    if "scheduled_arrival_arr" in df.columns and "scheduled_arrival" not in df.columns:
-        rename_map["scheduled_arrival_arr"] = "scheduled_arrival"
+def build_training_frame_for_regressor(df_ref: pd.DataFrame) -> pd.DataFrame:
+    X = df_ref.drop(
+        columns=COLS_A_VIRER_REGRESSOR + ["arrival_delay_min", "retard_arrivee"],
+        errors="ignore",
+    ).copy()
+    X = datetime_clean_like_notebook(X, DATETIME_COLS_NOTEBOOK)
+    return X
 
-    if "movement_date_dep" in df.columns and "movement_date" not in df.columns:
-        rename_map["movement_date_dep"] = "movement_date"
 
-    if "status_dep" in df.columns and "status" not in df.columns:
-        rename_map["status_dep"] = "status"
+def fit_preprocessor_from_training(
+    X_train_ref: pd.DataFrame,
+    model,
+    task_name: str,
+) -> dict:
+    X_train_ref = X_train_ref.copy()
 
-    if rename_map:
-        logger.info("Rename columns applied: %s", rename_map)
-        df = df.rename(columns=rename_map)
+    cat_cols = X_train_ref.select_dtypes(include=["object", "category"]).columns.tolist()
 
-    return df
+    encoder = None
+    if cat_cols:
+        encoder = OrdinalEncoder(
+            handle_unknown="use_encoded_value",
+            unknown_value=-1,
+        )
+        X_train_ref[cat_cols] = encoder.fit_transform(X_train_ref[cat_cols].astype(str))
+
+    num_cols = X_train_ref.select_dtypes(include=[np.number]).columns.tolist()
+    medians = X_train_ref[num_cols].median() if num_cols else pd.Series(dtype=float)
+
+    if num_cols:
+        X_train_ref[num_cols] = X_train_ref[num_cols].fillna(medians)
+
+    expected_cols = None
+    if hasattr(model, "feature_names_in_"):
+        expected_cols = list(model.feature_names_in_)
+    else:
+        expected_cols = list(X_train_ref.columns)
+
+    logger.info("[%s] cat_cols: %s", task_name, cat_cols)
+    logger.info("[%s] num_cols count: %s", task_name, len(num_cols))
+    logger.info("[%s] expected_cols count: %s", task_name, len(expected_cols))
+
+    return {
+        "cat_cols": cat_cols,
+        "num_cols": num_cols,
+        "encoder": encoder,
+        "medians": medians,
+        "expected_cols": expected_cols,
+    }
+
+
+def prepare_single_row_base(
+    df_real_single: pd.DataFrame,
+    df_reference: pd.DataFrame,
+    flight_number: str,
+    date: str,
+    departure_airport: str,
+) -> pd.DataFrame:
+    X = get_reference_row(df_reference, TEST_ROW_INDEX)
+    df_real_single = align_single_row_columns(df_real_single)
+
+    common_cols = [c for c in df_real_single.columns if c in X.columns]
+    for col in common_cols:
+        X[col] = df_real_single.iloc[0][col]
+
+    if "flight_number" in X.columns:
+        X["flight_number"] = flight_number
+
+    if "airport_origin" in X.columns:
+        X["airport_origin"] = departure_airport
+
+    if "flight_date" in X.columns:
+        X["flight_date"] = date
+
+    return X
+
+
+def apply_preprocessor_to_single_row(
+    X_single: pd.DataFrame,
+    task: str,
+    preprocessor: dict,
+) -> pd.DataFrame:
+    X_single = X_single.copy()
+
+    if task == "classifier":
+        X_single = X_single.drop(
+            columns=COLS_A_VIRER_CLASSIFIER + ["retard_arrivee"],
+            errors="ignore",
+        )
+    elif task == "regressor":
+        X_single = X_single.drop(
+            columns=COLS_A_VIRER_REGRESSOR + ["arrival_delay_min", "retard_arrivee"],
+            errors="ignore",
+        )
+    else:
+        raise ValueError(f"Task inconnue: {task}")
+
+    X_single = datetime_clean_like_notebook(X_single, DATETIME_COLS_NOTEBOOK)
+
+    cat_cols = preprocessor["cat_cols"]
+    encoder = preprocessor["encoder"]
+    num_cols = preprocessor["num_cols"]
+    medians = preprocessor["medians"]
+    expected_cols = preprocessor["expected_cols"]
+
+    for col in cat_cols:
+        if col not in X_single.columns:
+            X_single[col] = ""
+
+    if cat_cols and encoder is not None:
+        X_single[cat_cols] = encoder.transform(X_single[cat_cols].astype(str))
+
+    for col in expected_cols:
+        if col not in X_single.columns:
+            X_single[col] = np.nan
+
+    if num_cols:
+        missing_num_cols = [c for c in num_cols if c not in X_single.columns]
+        for col in missing_num_cols:
+            X_single[col] = np.nan
+
+        fill_cols = [c for c in num_cols if c in X_single.columns and c in medians.index]
+        if fill_cols:
+            X_single[fill_cols] = X_single[fill_cols].fillna(medians[fill_cols])
+
+    X_single = X_single[expected_cols].copy()
+
+    logger.info("[%s] Prepared shape: %s", task, X_single.shape)
+    logger.info("[%s] Prepared columns: %s", task, X_single.columns.tolist())
+
+    return X_single
 
 
 def select_single_flight_row(
@@ -258,86 +465,53 @@ def select_single_flight_row(
     return df.iloc[[0]].copy()
 
 
-def prepare_features_from_real_single_row(
-    df_real_single: pd.DataFrame,
-    df_reference: pd.DataFrame,
-    flight_number: str,
-    date: str,
-    departure_airport: str
-) -> pd.DataFrame:
-    X = get_reference_row(df_reference, TEST_ROW_INDEX)
-    df_real_single = harmonize_columns_for_model_input(df_real_single)
-
-    common_cols = [c for c in df_real_single.columns if c in X.columns]
-    for col in common_cols:
-        X[col] = df_real_single.iloc[0][col]
-
-    if "flight_number" in X.columns:
-        X["flight_number"] = flight_number
-
-    if "airport_origin" in X.columns:
-        X["airport_origin"] = departure_airport
-
-    if "flight_date" in X.columns:
-        X["flight_date"] = date
-
-    X = X.drop(columns=[
-        "retard arrivée",
-        "arrival_delay_min",
-        "status",
-    ], errors="ignore")
-
-    datetime_cols = [
-        "flight_date",
-        "movement_date",
-        "scheduled_departure",
-        "scheduled_arrival",
-        "time_dep",
-        "time_arr",
-    ]
-
-    X = add_datetime_features_safe(X, datetime_cols)
-
-    logger.info("Prepared features shape: %s", X.shape)
-    logger.info("Prepared features columns: %s", X.columns.tolist())
-    return X
-
-
-# MODELS
-
+# =========================================================
+# MODELS + PREPROCESSORS
+# =========================================================
 def load_models():
-    global classifier_model, regressor_model, df_reference
+    global classifier_model, regressor_model, df_reference, clf_preprocessor, reg_preprocessor
 
     if df_reference is None:
         df_reference = load_reference_dataframe()
 
     if classifier_model is None:
         logger.info("Loading classifier model from MLflow: %s", CLASSIFIER_MODEL_URI)
-        classifier_model = mlflow.sklearn.load_model(CLASSIFIER_MODEL_URI)
+        classifier_model = mlflow.xgboost.load_model(CLASSIFIER_MODEL_URI)
         logger.info("Classifier loaded successfully")
 
     if regressor_model is None:
         logger.info("Loading regressor model from MLflow: %s", REGRESSOR_MODEL_URI)
-
-        if REGRESSOR_LOADER == "sklearn":
-            regressor_model = mlflow.sklearn.load_model(REGRESSOR_MODEL_URI)
-        else:
-            regressor_model = mlflow.pyfunc.load_model(REGRESSOR_MODEL_URI)
-
+        regressor_model = mlflow.xgboost.load_model(REGRESSOR_MODEL_URI)
         logger.info("Regressor loaded successfully")
 
+    if clf_preprocessor is None:
+        X_clf_train_ref = build_training_frame_for_classifier(df_reference)
+        clf_preprocessor = fit_preprocessor_from_training(
+            X_train_ref=X_clf_train_ref,
+            model=classifier_model,
+            task_name="classifier",
+        )
 
+    if reg_preprocessor is None:
+        X_reg_train_ref = build_training_frame_for_regressor(df_reference)
+        reg_preprocessor = fit_preprocessor_from_training(
+            X_train_ref=X_reg_train_ref,
+            model=regressor_model,
+            task_name="regressor",
+        )
+
+
+# =========================================================
 # FLIGHT LOOKUP + ETL
-
+# =========================================================
 def run_single_flight_lookup_pipeline(
     flight_number: str,
     date: str,
-    departure_airport: str
+    departure_airport: str,
+    arrival_airport: Optional[str] = None,
 ) -> dict:
     if not GLOBAL_RUN_SINGLE_FLIGHT_PATH.exists():
-        raise FileNotFoundError(
-            f"GlobalRunSingleFlight.py introuvable à : {GLOBAL_RUN_SINGLE_FLIGHT_PATH}"
-        )
+        raise FileNotFoundError(f"GlobalRunSingleFlight.py introuvable à : {GLOBAL_RUN_SINGLE_FLIGHT_PATH}")
 
     cmd = [
         sys.executable,
@@ -346,6 +520,9 @@ def run_single_flight_lookup_pipeline(
         date,
         departure_airport,
     ]
+
+    if arrival_airport:
+        cmd.append(arrival_airport)
 
     env = os.environ.copy()
     env["ENABLE_S3_UPLOAD"] = ENABLE_S3_UPLOAD
@@ -365,13 +542,15 @@ def run_single_flight_lookup_pipeline(
     if completed.stderr:
         logger.warning("flight_lookup stderr:\n%s", completed.stderr)
 
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"GlobalRunSingleFlight failed with code {completed.returncode}: "
-            f"{completed.stderr or completed.stdout}"
-        )
-
     request_id = extract_request_id_from_stdout(completed.stdout)
+
+    if completed.returncode != 0:
+        friendly_message = build_user_friendly_pipeline_error(
+            request_id=request_id,
+            fallback_message="Vol introuvable. Veuillez vérifier le numéro de vol, la date, l’horaire et l’aéroport de départ."
+        )
+        raise ValueError(friendly_message)
+
     run_date = datetime.now().strftime("%Y-%m-%d")
 
     logger.info("Recovered request_id=%s run_date=%s", request_id, run_date)
@@ -387,11 +566,7 @@ def run_etl_pipeline(
     request_id: str,
     run_date: str
 ) -> tuple[pd.DataFrame, str]:
-    logger.info(
-        "Running ETL pipeline for request_id=%s run_date=%s",
-        request_id,
-        run_date,
-    )
+    logger.info("Running ETL pipeline for request_id=%s run_date=%s", request_id, run_date)
 
     df_single, _, output_path = transform_single_flight_dataset(
         request_id=request_id,
@@ -415,17 +590,26 @@ def run_etl_pipeline(
     return df_single, upload_result["s3_uri"]
 
 
+# =========================================================
 # PREDICTION
-
+# =========================================================
 def run_prediction(
     flight_number: str,
     date: str,
-    departure_airport: str
+    departure_airport: str,
+    arrival_airport: Optional[str] = None,
 ) -> dict:
-    if classifier_model is None or regressor_model is None or df_reference is None:
-        raise RuntimeError("Models or reference dataframe not loaded")
+    if (
+        classifier_model is None
+        or regressor_model is None
+        or df_reference is None
+        or clf_preprocessor is None
+        or reg_preprocessor is None
+    ):
+        raise RuntimeError("Models, preprocessors or reference dataframe not loaded")
 
     departure_airport_clean = normalize_departure_airport(departure_airport)
+    arrival_airport_clean = normalize_departure_airport(arrival_airport) if arrival_airport else None
     flight_number_clean = normalize_flight_number(flight_number)
 
     logger.info(
@@ -439,68 +623,87 @@ def run_prediction(
         flight_number=flight_number_clean,
         date=date,
         departure_airport=departure_airport_clean,
+        arrival_airport=arrival_airport_clean,
     )
 
     request_id = lookup_result["request_id"]
     run_date = lookup_result["run_date"]
+
+    status_payload = read_request_status(request_id)
 
     df_single_etl, processed_s3_uri = run_etl_pipeline(
         request_id=request_id,
         run_date=run_date,
     )
 
+    matched_flight_number = status_payload.get("matched_flight_number") or flight_number_clean
+
     df_real_single = select_single_flight_row(
         df=df_single_etl,
-        flight_number=flight_number_clean,
+        flight_number=matched_flight_number,
         departure_airport=departure_airport_clean,
     )
 
     returned_arrival_airport = None
-
     if "airport_destination" in df_real_single.columns:
         returned_arrival_airport = str(df_real_single.iloc[0]["airport_destination"]).strip()
     elif "arrival_airport" in df_real_single.columns:
         returned_arrival_airport = str(df_real_single.iloc[0]["arrival_airport"]).strip()
 
-    X_prepared = prepare_features_from_real_single_row(
+    X_base = prepare_single_row_base(
         df_real_single=df_real_single,
         df_reference=df_reference,
-        flight_number=flight_number_clean,
+        flight_number=matched_flight_number,
         date=date,
         departure_airport=departure_airport_clean,
     )
 
-    clf_pred = classifier_model.predict(X_prepared)
+    X_clf = apply_preprocessor_to_single_row(
+        X_single=X_base,
+        task="classifier",
+        preprocessor=clf_preprocessor,
+    )
+
+    X_reg = apply_preprocessor_to_single_row(
+        X_single=X_base,
+        task="regressor",
+        preprocessor=reg_preprocessor,
+    )
+
+    clf_pred = classifier_model.predict(X_clf)
     clf_pred_value = int(clf_pred[0])
 
     if hasattr(classifier_model, "predict_proba"):
-        clf_proba = classifier_model.predict_proba(X_prepared)
+        clf_proba = classifier_model.predict_proba(X_clf)
         clf_proba_value = float(clf_proba[0][1])
     else:
         clf_proba_value = float(clf_pred_value)
 
-    reg_pred = regressor_model.predict(X_prepared)
+    reg_pred = regressor_model.predict(X_reg)
     reg_pred_value = float(reg_pred[0])
     reg_pred_value = max(0.0, reg_pred_value)
 
+    final_message = "Prédiction générée avec succès."
+    if status_payload.get("warning_message"):
+        final_message = status_payload.get("user_message") or final_message
+
     return {
         "status": "success",
-        "flight_number": flight_number_clean,
+        "flight_number": matched_flight_number,
         "date": date,
         "departure_airport": departure_airport_clean,
         "arrival_airport": returned_arrival_airport,
         "delay_probability": clf_proba_value,
         "predicted_arrival_delay_minutes": reg_pred_value,
         "is_delayed": bool(clf_pred_value),
-        "message": (
-            f"Prediction generated successfully "
-            f"(request_id={request_id}, processed={processed_s3_uri})"
-        )
+        "message": f"{final_message} (request_id={request_id}, processed={processed_s3_uri})",
+        "warning_message": status_payload.get("warning_message"),
     }
 
 
+# =========================================================
 # STARTUP
-
+# =========================================================
 @app.on_event("startup")
 def startup_event():
     try:
@@ -511,8 +714,9 @@ def startup_event():
         raise
 
 
+# =========================================================
 # ENDPOINTS
-
+# =========================================================
 @app.get("/health")
 def health_check():
     return {
@@ -537,9 +741,10 @@ def debug_models():
         "reference_loaded": df_reference is not None,
         "n_rows": 0 if df_reference is None else int(len(df_reference)),
         "n_cols": 0 if df_reference is None else int(df_reference.shape[1]),
-        "regressor_loader": REGRESSOR_LOADER,
         "flight_lookup_dir": str(FLIGHT_LOOKUP_DIR),
         "global_run_single_flight_exists": GLOBAL_RUN_SINGLE_FLIGHT_PATH.exists(),
+        "clf_preprocessor_ready": clf_preprocessor is not None,
+        "reg_preprocessor_ready": reg_preprocessor is not None,
     }
 
 
@@ -551,7 +756,8 @@ def predict(payload: PredictionRequest):
         result = run_prediction(
             flight_number=payload.flight_number,
             date=payload.date,
-            departure_airport=payload.departure_airport
+            departure_airport=payload.departure_airport,
+            arrival_airport=payload.arrival_airport,
         )
 
         return PredictionResponse(**result)
@@ -567,9 +773,9 @@ def predict(payload: PredictionRequest):
             detail=f"Model or resource not found: {str(e)}"
         )
 
-    except Exception as e:
+    except Exception:
         logger.exception("Unexpected error during prediction")
         raise HTTPException(
             status_code=500,
-            detail=f"Unexpected server error: {str(e)}"
+            detail="Une erreur technique est survenue pendant la prédiction. Merci de réessayer."
         )
