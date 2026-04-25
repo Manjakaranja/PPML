@@ -24,22 +24,11 @@ ENABLE_S3_UPLOAD = os.getenv("ENABLE_S3_UPLOAD", "0") == "1"
 def safe_load_json(path: Path) -> dict:
     if not path.exists():
         return {}
-
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def parse_input():
-    """
-    Priorité :
-    1. arguments CLI (utile pour FastAPI)
-    2. fallback sur flight_selection.json (utile pour test manuel)
-
-    Exemples :
-    python GlobalRunSingleFlight.py AF1234 2026-04-20 CDG
-    python GlobalRunSingleFlight.py AF1234 "2026-04-20 14:30" CDG
-    python GlobalRunSingleFlight.py AF1234 "2026-04-20 14:30" CDG NCE
-    """
     args = sys.argv[1:]
 
     if len(args) >= 3:
@@ -50,9 +39,7 @@ def parse_input():
     else:
         flight_data = safe_load_json(FLIGHT_SELECTION_PATH)
         flight_number = str(flight_data.get("flight_number", "")).strip()
-        selected_date_raw = str(
-            flight_data.get("selected_date", flight_data.get("date", ""))
-        ).strip()
+        selected_date_raw = str(flight_data.get("selected_date", flight_data.get("date", ""))).strip()
         departure_airport = str(flight_data.get("departure_airport", "")).strip()
         arrival_airport = str(flight_data.get("arrival_airport", "")).strip()
 
@@ -148,9 +135,7 @@ def get_latest_single_flight_csv(search_dir: Path) -> Path:
     )
 
     if not candidates:
-        raise FileNotFoundError(
-            f"Aucun fichier SingleFlightData_*.csv trouvé dans {search_dir}"
-        )
+        raise FileNotFoundError(f"Aucun fichier SingleFlightData_*.csv trouvé dans {search_dir}")
 
     return candidates[0]
 
@@ -181,9 +166,7 @@ def extract_destination_from_single_flight_csv(search_dir: Path) -> str:
             break
 
     if destination_col is None:
-        raise KeyError(
-            f"Aucune colonne destination trouvée dans {csv_path}. Colonnes: {df.columns.tolist()}"
-        )
+        raise KeyError(f"Aucune colonne destination trouvée dans {csv_path}. Colonnes: {df.columns.tolist()}")
 
     destination = str(df.iloc[0][destination_col]).strip()
 
@@ -218,12 +201,7 @@ def move_dir_contents(src_dir: Path, dst_dir: Path):
             shutil.move(str(item), str(target))
 
 
-def collect_legacy_outputs(request_dirs: dict, request_id: str):
-    """
-    Déplace les sorties générées par les scripts historiques vers output/requete_xxx.
-    Cette partie est une rustine utile, mais le vrai multi-users demande idéalement
-    que chaque script enfant écrive directement dans REQUEST_DIR.
-    """
+def collect_legacy_outputs(request_dirs: dict):
     move_dir_contents(LEGACY_OUTPUT_SINGLE, request_dirs["single"])
     move_dir_contents(LEGACY_OUTPUT_GREVES, request_dirs["greves"])
     move_dir_contents(LEGACY_OUTPUT_METEO, request_dirs["meteo"])
@@ -263,9 +241,7 @@ def convert_signoff_csv_to_parquet(request_dir: Path, request_id: str) -> Path:
         candidates = single_candidates
 
     if not candidates:
-        raise FileNotFoundError(
-            f"Aucun fichier SignoffFlightsDataset_Single*.csv exploitable trouvé dans {request_dir}"
-        )
+        raise FileNotFoundError(f"Aucun fichier SignoffFlightsDataset_Single*.csv exploitable trouvé dans {request_dir}")
 
     latest_csv = candidates[0]
     parquet_path = request_dir / f"SignoffFlightsDataset_Single_{request_id}.parquet"
@@ -275,6 +251,39 @@ def convert_signoff_csv_to_parquet(request_dir: Path, request_id: str) -> Path:
     df.to_parquet(parquet_path, index=False)
 
     return parquet_path
+
+
+def get_status_file_path(request_dirs: dict) -> Path:
+    return request_dirs["request_dir"] / "flight_request_status.json"
+
+
+def read_request_status(request_dirs: dict) -> dict:
+    status_path = get_status_file_path(request_dirs)
+    if not status_path.exists():
+        return {}
+
+    with open(status_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def is_blocking_status(status_payload: dict) -> bool:
+    return status_payload.get("status") in {
+        "error_flight_not_found",
+        "error_time_mismatch",
+        "error_api_unavailable",
+    }
+
+
+def upload_logs_if_needed(env: dict):
+    if not ENABLE_S3_UPLOAD:
+        return
+
+    try:
+        env_logs = env.copy()
+        env_logs["UPLOAD_MODE"] = "logs_only"
+        run_script(["S3_Upload_Single.py"], env=env_logs)
+    except Exception as exc:
+        print(f"[WARN] Upload S3 des logs impossible : {exc}")
 
 
 def main():
@@ -314,13 +323,11 @@ def main():
     print("REQUEST_ID:", request_id)
     print("REQUEST_DIR:", request_dirs["request_dir"])
     print("ENABLE_S3_UPLOAD:", ENABLE_S3_UPLOAD)
+    print("DEBUG_NEW_GLOBALRUN_VERSION_RUNNING")
 
-    # =========================
-    # PHASE 1 : trouver le vrai vol
-    # =========================
     phase_1_scripts = [
         ["CleanCSV.py"],
-        ["aerodatabox_Single_flight.py", flight_number, flight_date, airp_src, airp_dst],
+        ["aerodatabox_Single_flight.py", flight_number, selected_date_raw, airp_src, airp_dst],
     ]
 
     for script in phase_1_scripts:
@@ -328,28 +335,33 @@ def main():
             run_script(script, env=env)
         except subprocess.CalledProcessError as e:
             print(f"\nErreur dans {script[0]} -> arrêt du pipeline")
-            raise RuntimeError(
-                f"Le script {script[0]} a échoué avec le code {e.returncode}"
-            ) from e
+            collect_legacy_outputs(request_dirs)
+
+            status_payload = read_request_status(request_dirs)
+            if is_blocking_status(status_payload):
+                upload_logs_if_needed(env)
+                raise RuntimeError(status_payload.get("user_message", "Erreur pendant la recherche du vol.")) from e
+
+            upload_logs_if_needed(env)
+            raise RuntimeError(f"Le script {script[0]} a échoué avec le code {e.returncode}") from e
         except Exception as e:
             print(f"\nErreur inattendue dans {script[0]} -> arrêt du pipeline")
+            collect_legacy_outputs(request_dirs)
+            upload_logs_if_needed(env)
             raise RuntimeError(f"Erreur sur {script[0]} : {str(e)}") from e
 
-    # si les scripts enfants n'écrivent pas encore dans REQUEST_OUTPUT_SINGLE,
-    # on rapatrie les fichiers legacy ici
-    collect_legacy_outputs(request_dirs, request_id)
+    collect_legacy_outputs(request_dirs)
 
-    # =========================
-    # PHASE 2 : récupérer la vraie destination
-    # =========================
+    status_payload = read_request_status(request_dirs)
+    if is_blocking_status(status_payload):
+        upload_logs_if_needed(env)
+        raise RuntimeError(status_payload.get("user_message", "Erreur pendant la recherche du vol."))
+
     if not airp_dst:
         airp_dst = extract_destination_from_single_flight_csv(request_dirs["single"])
 
     print(f"[INFO] AirpDST final utilisé pour le pipeline : {airp_dst}")
 
-    # =========================
-    # PHASE 3 : lancer le reste
-    # =========================
     phase_3_scripts = [
         ["vols_journaliers_1DayDateAirport.py", flight_date, airp_src],
         ["vols_journaliers_1DayDateAirport.py", flight_date, airp_dst],
@@ -367,14 +379,14 @@ def main():
     for script in phase_3_scripts:
         try:
             run_script(script, env=env)
-            collect_legacy_outputs(request_dirs, request_id)
+            collect_legacy_outputs(request_dirs)
         except subprocess.CalledProcessError as e:
             print(f"\nErreur dans {script[0]} -> arrêt du pipeline")
-            raise RuntimeError(
-                f"Le script {script[0]} a échoué avec le code {e.returncode}"
-            ) from e
+            upload_logs_if_needed(env)
+            raise RuntimeError(f"Le script {script[0]} a échoué avec le code {e.returncode}") from e
         except Exception as e:
             print(f"\nErreur inattendue dans {script[0]} -> arrêt du pipeline")
+            upload_logs_if_needed(env)
             raise RuntimeError(f"Erreur sur {script[0]} : {str(e)}") from e
 
     parquet_path = convert_signoff_csv_to_parquet(
@@ -388,9 +400,7 @@ def main():
             run_script(["S3_Upload_Single.py"], env=env)
         except subprocess.CalledProcessError as e:
             print(f"\nErreur dans S3_Upload_Single.py")
-            raise RuntimeError(
-                f"Le script S3_Upload_Single.py a échoué avec le code {e.returncode}"
-            ) from e
+            raise RuntimeError(f"Le script S3_Upload_Single.py a échoué avec le code {e.returncode}") from e
         except Exception as e:
             raise RuntimeError(f"Erreur sur S3_Upload_Single.py : {str(e)}") from e
 

@@ -7,7 +7,8 @@ import json
 import os
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -18,43 +19,92 @@ load_dotenv()
 
 
 # ============================================================
-# OUTIL : découpage de période en tranches de 12h
-# ============================================================
-
-def daterange_12h(start_date: datetime, end_date: datetime):
-    current = start_date
-    while current < end_date:
-        next_ = min(current + timedelta(hours=12), end_date)
-        yield current, next_
-        current = next_
-
-
-# ============================================================
 # CONFIGURATION
 # ============================================================
 
 API_BASE_URL = "https://prod.api.market/api/v1/aedbx/aerodatabox"
 
-PARIS_AIRPORTS = {"CDG", "ORY"}
-REGIONAL_AIRPORTS = {"LYS", "NCE", "MRS", "TLS"}
-ALL_AIRPORTS = sorted(PARIS_AIRPORTS | REGIONAL_AIRPORTS)
-
 REQUEST_TIMEOUT = 60
-REQUEST_SLEEP_SECONDS = 0.4
-DAYS_BACK = 1
-
 MAX_RETRIES = 5
 RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 BACKOFF_FACTOR = 2.0
 INITIAL_BACKOFF_SECONDS = 1.5
 
+TIME_TOLERANCE_MINUTES = 30
+
 
 # ============================================================
-# OUTILS
+# OUTILS REQUÊTE / FICHIERS
 # ============================================================
 
 def get_output_dir() -> str:
     return os.getenv("REQUEST_OUTPUT_SINGLE", "OutputSingleFlight")
+
+
+def get_request_dir() -> Path:
+    request_dir = os.getenv("REQUEST_DIR")
+    if request_dir:
+        return Path(request_dir)
+    return Path(get_output_dir())
+
+
+def get_request_id() -> str:
+    return os.getenv("REQUEST_ID", "unknown_request")
+
+
+def get_status_file_path() -> Path:
+    return get_request_dir() / "flight_request_status.json"
+
+
+def get_log_file_path() -> Path:
+    return get_request_dir() / "API_Single_ERR.log"
+
+
+def append_error_log(message: str) -> None:
+    log_path = get_log_file_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"[{ts}] {message}\n")
+
+
+def write_request_status(
+    *,
+    status: str,
+    user_message: str,
+    error_code: Optional[str] = None,
+    warning_message: Optional[str] = None,
+    matched_flight_number: Optional[str] = None,
+    matched_scheduled_departure: Optional[str] = None,
+    matched_departure_airport: Optional[str] = None,
+    matched_arrival_airport: Optional[str] = None,
+    requested_flight_number: Optional[str] = None,
+    requested_flight_date: Optional[str] = None,
+    requested_departure_airport: Optional[str] = None,
+    requested_arrival_airport: Optional[str] = None,
+) -> None:
+    payload = {
+        "request_id": get_request_id(),
+        "status": status,
+        "error_code": error_code,
+        "user_message": user_message,
+        "warning_message": warning_message,
+        "matched_flight_number": matched_flight_number,
+        "matched_scheduled_departure": matched_scheduled_departure,
+        "matched_departure_airport": matched_departure_airport,
+        "matched_arrival_airport": matched_arrival_airport,
+        "requested_flight_number": requested_flight_number,
+        "requested_flight_date": requested_flight_date,
+        "requested_departure_airport": requested_departure_airport,
+        "requested_arrival_airport": requested_arrival_airport,
+        "generated_at": datetime.now().isoformat(),
+    }
+
+    status_path = get_status_file_path()
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(status_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 def env_or_fail(name: str) -> str:
@@ -73,37 +123,13 @@ def build_headers() -> Dict[str, str]:
     }
 
 
-def get_date_range(days_back: int = 5) -> Tuple[str, str]:
-    end_date = date.today()
-    start_date = end_date - timedelta(days=days_back - 1)
-    return start_date.isoformat(), end_date.isoformat()
-
-
 def parse_dt(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except Exception:
         return None
-
-
-def compute_delay_and_advance_minutes(
-    reference_value: Optional[str],
-    scheduled_value: Optional[str],
-) -> Tuple[Optional[int], Optional[int]]:
-    reference_dt = parse_dt(reference_value)
-    scheduled_dt = parse_dt(scheduled_value)
-
-    if not reference_dt or not scheduled_dt:
-        return None, None
-
-    diff_min = int((reference_dt - scheduled_dt).total_seconds() / 60)
-
-    if diff_min >= 0:
-        return diff_min, 0
-
-    return 0, abs(diff_min)
 
 
 def get_local_time(block: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -126,6 +152,30 @@ def normalize_status(status: Optional[str]) -> str:
     return (status or "").strip().lower()
 
 
+def normalize_flight_number(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return str(value).replace(" ", "").upper().strip()
+
+
+def compute_delay_and_advance_minutes(
+    reference_value: Optional[str],
+    scheduled_value: Optional[str],
+) -> Tuple[Optional[int], Optional[int]]:
+    reference_dt = parse_dt(reference_value)
+    scheduled_dt = parse_dt(scheduled_value)
+
+    if not reference_dt or not scheduled_dt:
+        return None, None
+
+    diff_min = int((reference_dt - scheduled_dt).total_seconds() / 60)
+
+    if diff_min >= 0:
+        return diff_min, 0
+
+    return 0, abs(diff_min)
+
+
 def choose_actual_or_fallback(
     actual_value: Optional[str],
     revised_value: Optional[str],
@@ -141,35 +191,26 @@ def choose_actual_or_fallback(
     return None, None
 
 
-def is_target_route(origin: Optional[str], destination: Optional[str]) -> bool:
-    if not origin or not destination:
-        return False
+def minutes_diff_between_iso_and_hour(iso_dt: Optional[str], requested_hour: str) -> Optional[int]:
+    if not iso_dt or not requested_hour:
+        return None
 
-    return (
-        (origin in PARIS_AIRPORTS and destination in REGIONAL_AIRPORTS)
-        or
-        (origin in REGIONAL_AIRPORTS and destination in PARIS_AIRPORTS)
-    )
+    try:
+        dt = datetime.fromisoformat(str(iso_dt).replace("Z", "+00:00"))
+    except Exception:
+        return None
 
+    try:
+        req_h, req_m = requested_hour.split(":")
+        req_hour = int(req_h)
+        req_min = int(req_m)
+    except Exception:
+        return None
 
-def is_domestic_france_route(origin: Optional[str], destination: Optional[str]) -> bool:
-    if not origin or not destination:
-        return False
+    flight_minutes = dt.hour * 60 + dt.minute
+    requested_minutes = req_hour * 60 + req_min
+    return abs(flight_minutes - requested_minutes)
 
-    return origin in ALL_AIRPORTS and destination in ALL_AIRPORTS
-
-
-def is_any_route_within_scope(origin: Optional[str], destination: Optional[str]) -> bool:
-    return bool(origin in ALL_AIRPORTS or destination in ALL_AIRPORTS)
-
-
-def is_route_of_interest(origin: Optional[str], destination: Optional[str]) -> bool:
-    return is_target_route(origin, destination)
-
-
-# ============================================================
-# API AERODATABOX
-# ============================================================
 
 def request_with_retries(
     method: str,
@@ -201,8 +242,7 @@ def request_with_retries(
                     retry_after_seconds = INITIAL_BACKOFF_SECONDS * (BACKOFF_FACTOR ** (attempt - 1))
 
                 print(
-                    f"   ! HTTP {response.status_code} sur {url} - tentative {attempt}/{max_retries}, "
-                    f"nouvel essai dans {retry_after_seconds:.1f}s",
+                    f"HTTP {response.status_code} - tentative {attempt}/{max_retries}, retry dans {retry_after_seconds:.1f}s",
                     file=sys.stderr,
                 )
                 time.sleep(retry_after_seconds)
@@ -218,8 +258,7 @@ def request_with_retries(
 
             sleep_seconds = INITIAL_BACKOFF_SECONDS * (BACKOFF_FACTOR ** (attempt - 1))
             print(
-                f"   ! Erreur réseau ({exc.__class__.__name__}) - tentative {attempt}/{max_retries}, "
-                f"nouvel essai dans {sleep_seconds:.1f}s",
+                f"Erreur réseau ({exc.__class__.__name__}) - tentative {attempt}/{max_retries}, retry dans {sleep_seconds:.1f}s",
                 file=sys.stderr,
             )
             time.sleep(sleep_seconds)
@@ -231,7 +270,7 @@ def request_with_retries(
 
 
 # ============================================================
-# EXTRACTION DES DONNÉES
+# EXTRACTION
 # ============================================================
 
 def extract_departure_record_all(dep: Dict[str, Any], queried_airport: str) -> Optional[Dict[str, Any]]:
@@ -272,6 +311,10 @@ def extract_departure_record_all(dep: Dict[str, Any], queried_airport: str) -> O
 
     movement_date = scheduled_departure[:10] if scheduled_departure else None
 
+    codeshares = dep.get("codeshares", [])
+    if not isinstance(codeshares, list):
+        codeshares = [codeshares] if codeshares else []
+
     return {
         "flight_date": scheduled_departure[:10] if scheduled_departure else (
             scheduled_arrival[:10] if scheduled_arrival else None
@@ -297,100 +340,97 @@ def extract_departure_record_all(dep: Dict[str, Any], queried_airport: str) -> O
         "arrival_advance_min": arrival_advance_min,
         "status": status,
         "movement_type": "departure",
-        "codeshares": dep.get("codeshares", []),
-    }
-
-
-def extract_arrival_record_all(arr: Dict[str, Any], queried_airport: str) -> Optional[Dict[str, Any]]:
-    departure = arr.get("departure") or {}
-    arrival = arr.get("arrival") or {}
-    airline = arr.get("airline") or {}
-
-    status = arr.get("status")
-
-    departure_airport = departure.get("airport") or {}
-    origin = departure_airport.get("iata")
-    destination = queried_airport
-
-    scheduled_departure = get_local_time(departure.get("scheduledTime"))
-    revised_departure = get_local_time(departure.get("revisedTime"))
-    raw_actual_departure = get_local_time(departure.get("actualTime"))
-
-    scheduled_arrival = get_local_time(arrival.get("scheduledTime"))
-    revised_arrival = get_local_time(arrival.get("revisedTime"))
-    raw_actual_arrival = get_local_time(arrival.get("actualTime"))
-
-    estimated_departure = revised_departure or scheduled_departure
-    estimated_arrival = revised_arrival or scheduled_arrival
-
-    actual_departure, actual_source_departure = choose_actual_or_fallback(
-        raw_actual_departure, revised_departure, status
-    )
-    actual_arrival, actual_source_arrival = choose_actual_or_fallback(
-        raw_actual_arrival, revised_arrival, status
-    )
-
-    departure_delay_min, departure_advance_min = compute_delay_and_advance_minutes(
-        actual_departure, scheduled_departure
-    )
-    arrival_delay_min, arrival_advance_min = compute_delay_and_advance_minutes(
-        actual_arrival, scheduled_arrival
-    )
-
-    movement_date = scheduled_arrival[:10] if scheduled_arrival else None
-
-    return {
-        "flight_date": scheduled_departure[:10] if scheduled_departure else (
-            scheduled_arrival[:10] if scheduled_arrival else None
-        ),
-        "movement_date": movement_date,
-        "flight_number": arr.get("number"),
-        "airline": airline.get("name"),
-        "airport_origin": origin,
-        "airport_destination": destination,
-        "terminal_departure": departure.get("terminal"),
-        "terminal_arrival": arrival.get("terminal"),
-        "scheduled_departure": scheduled_departure,
-        "scheduled_arrival": scheduled_arrival,
-        "estimated_departure": estimated_departure,
-        "estimated_arrival": estimated_arrival,
-        "actual_departure": actual_departure,
-        "actual_arrival": actual_arrival,
-        "actual_source_departure": actual_source_departure,
-        "actual_source_arrival": actual_source_arrival,
-        "departure_delay_min": departure_delay_min,
-        "departure_advance_min": departure_advance_min,
-        "arrival_delay_min": arrival_delay_min,
-        "arrival_advance_min": arrival_advance_min,
-        "status": status,
-        "movement_type": "arrival",
+        "codeshares": codeshares,
     }
 
 
 # ============================================================
-# FILTRAGE
+# FILTRAGE MÉTIER
 # ============================================================
 
-def extract_departure_record(dep: Dict[str, Any], queried_airport: str) -> Optional[Dict[str, Any]]:
-    row = extract_departure_record_all(dep, queried_airport)
-    if not row:
-        return None
+def flight_matches_requested_number(row: Dict[str, Any], requested_flight_number: str) -> bool:
+    requested = normalize_flight_number(requested_flight_number)
+    principal = normalize_flight_number(row.get("flight_number"))
 
-    if not is_route_of_interest(row.get("airport_origin"), row.get("airport_destination")):
-        return None
+    if principal == requested:
+        return True
 
-    return row
+    codeshares = row.get("codeshares", [])
+    return any(normalize_flight_number(cs) == requested for cs in codeshares)
 
 
-def extract_arrival_record(arr: Dict[str, Any], queried_airport: str) -> Optional[Dict[str, Any]]:
-    row = extract_arrival_record_all(arr, queried_airport)
-    if not row:
-        return None
+def is_codeshare_match(row: Dict[str, Any], requested_flight_number: str) -> bool:
+    requested = normalize_flight_number(requested_flight_number)
+    principal = normalize_flight_number(row.get("flight_number"))
+    if principal == requested:
+        return False
+    return any(normalize_flight_number(cs) == requested for cs in row.get("codeshares", []))
 
-    if not is_route_of_interest(row.get("airport_origin"), row.get("airport_destination")):
-        return None
 
-    return row
+def filter_best_matching_records(
+    records: List[Dict[str, Any]],
+    requested_flight_number: str,
+    requested_departure_airport: str,
+    requested_arrival_airport: str,
+    requested_hour: str,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    debug_info = {
+        "initial_count": len(records),
+        "after_flight_number_count": 0,
+        "after_departure_airport_count": 0,
+        "after_arrival_airport_count": 0,
+        "after_time_count": 0,
+        "best_time_diff_minutes": None,
+        "has_codeshare": False,
+    }
+
+    if not records:
+        return [], debug_info
+
+    filtered = [r for r in records if flight_matches_requested_number(r, requested_flight_number)]
+    debug_info["after_flight_number_count"] = len(filtered)
+
+    if not filtered:
+        return [], debug_info
+
+    filtered_dep = [
+        r for r in filtered
+        if str(r.get("airport_origin", "")).upper().strip() == requested_departure_airport.upper().strip()
+    ]
+    if filtered_dep:
+        filtered = filtered_dep
+    debug_info["after_departure_airport_count"] = len(filtered)
+
+    if requested_arrival_airport:
+        filtered_arr = [
+            r for r in filtered
+            if str(r.get("airport_destination", "")).upper().strip() == requested_arrival_airport.upper().strip()
+        ]
+        if filtered_arr:
+            filtered = filtered_arr
+    debug_info["after_arrival_airport_count"] = len(filtered)
+
+    if any(is_codeshare_match(r, requested_flight_number) for r in filtered):
+        debug_info["has_codeshare"] = True
+
+    if requested_hour:
+        valid_diffs = []
+        for row in filtered:
+            diff = minutes_diff_between_iso_and_hour(row.get("scheduled_departure"), requested_hour)
+            if diff is not None:
+                valid_diffs.append((row, diff))
+
+        if valid_diffs:
+            best_diff = min(diff for _, diff in valid_diffs)
+            debug_info["best_time_diff_minutes"] = best_diff
+
+            if best_diff <= TIME_TOLERANCE_MINUTES:
+                filtered = [row for row, diff in valid_diffs if diff == best_diff]
+            else:
+                filtered = []
+
+    debug_info["after_time_count"] = len(filtered)
+    return filtered, debug_info
 
 
 # ============================================================
@@ -445,30 +485,41 @@ def codeshares_str(val):
 def main() -> int:
     output_dir = get_output_dir()
     os.makedirs(output_dir, exist_ok=True)
+    get_request_dir().mkdir(parents=True, exist_ok=True)
 
     if len(sys.argv) < 2:
-        print(
-            "Usage: python aerodatabox_Single_flight.py <flight_number> [flight_date] [departure_airport] [arrival_airport]",
-            file=sys.stderr,
-        )
-        print(
-            "Exemple: python aerodatabox_Single_flight.py 'SQ 1894' 2026-04-16 CDG LYS",
-            file=sys.stderr,
+        append_error_log("Arguments insuffisants pour aerodatabox_Single_flight.py")
+        write_request_status(
+            status="error_flight_not_found",
+            error_code="MISSING_ARGUMENTS",
+            user_message="Vol introuvable. Veuillez vérifier le numéro de vol, la date, l’horaire et l’aéroport de départ.",
         )
         return 1
 
     flight_number = sys.argv[1]
-    flight_date = sys.argv[2] if len(sys.argv) > 2 else "2026-04-16"
+    flight_date_raw = sys.argv[2] if len(sys.argv) > 2 else "2026-04-16"
     departure_airport = sys.argv[3] if len(sys.argv) > 3 else "CDG"
-    arrival_airport = sys.argv[4] if len(sys.argv) > 4 else "LYS"
+    arrival_airport = sys.argv[4] if len(sys.argv) > 4 else ""
+
+    requested_hour = ""
+    flight_date = flight_date_raw
+
+    if "T" in flight_date_raw or " " in flight_date_raw:
+        try:
+            dt = datetime.fromisoformat(flight_date_raw.replace(" ", "T"))
+            requested_hour = dt.strftime("%H:%M")
+            flight_date = dt.strftime("%Y-%m-%d")
+        except Exception:
+            parts = flight_date_raw.replace("T", " ").split()
+            if len(parts) >= 2:
+                flight_date = parts[0]
+                requested_hour = parts[1][:5]
 
     generation_stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-
     url = f"{API_BASE_URL}/flights/number/{flight_number.replace(' ', '')}/{flight_date}"
-    print(f"[DEBUG] Appel API unique : {url}")
 
-    data = []
-    records = []
+    print(f"[DEBUG] Appel API unique : {url}")
+    print("DEBUG_NEW_AERODATABOX_VERSION_RUNNING")
 
     try:
         response = request_with_retries(
@@ -478,58 +529,221 @@ def main() -> int:
             timeout=REQUEST_TIMEOUT,
             max_retries=MAX_RETRIES,
         )
+
+        if response.status_code in {400, 404}:
+            msg = f"HTTP {response.status_code} - vol non trouvé ou informations invalides pour {flight_number} le {flight_date}"
+            append_error_log(msg)
+            write_request_status(
+                status="error_flight_not_found",
+                error_code="FLIGHT_NOT_FOUND",
+                user_message="Vol introuvable. Veuillez vérifier le numéro de vol, la date, l’horaire et l’aéroport de départ.",
+                requested_flight_number=flight_number,
+                requested_flight_date=flight_date_raw,
+                requested_departure_airport=departure_airport,
+                requested_arrival_airport=arrival_airport,
+            )
+            return 1
+
+        if response.status_code in {429, 500, 502, 503, 504}:
+            msg = f"HTTP {response.status_code} - service indisponible pour {flight_number} le {flight_date}"
+            append_error_log(msg)
+            write_request_status(
+                status="error_api_unavailable",
+                error_code="API_TEMPORARILY_UNAVAILABLE",
+                user_message="Le service de recherche de vol est momentanément indisponible. Merci de réessayer dans quelques instants.",
+                requested_flight_number=flight_number,
+                requested_flight_date=flight_date_raw,
+                requested_departure_airport=departure_airport,
+                requested_arrival_airport=arrival_airport,
+            )
+            return 1
+
         response.raise_for_status()
+#=====
+        response_text = response.text.strip()
 
         try:
             data = response.json()
         except Exception as json_exc:
-            print(f"Erreur lors du décodage JSON : {json_exc}", file=sys.stderr)
-            print(f"[DEBUG] Code HTTP : {response.status_code}")
-            print(f"[DEBUG] Longueur de la réponse brute : {len(response.text)}")
-            print(f"[DEBUG] Réponse brute : {response.text}")
-            data = []
-            return 0
+            append_error_log(f"Erreur décodage JSON Aerodatabox : {json_exc}")
 
-        print(f"[DEBUG] Réponse API : {str(data)[:500]}")
+            if not response_text:
+                append_error_log("Réponse API vide : interprétée comme vol introuvable.")
+                write_request_status(
+                    status="error_flight_not_found",
+                    error_code="EMPTY_RESPONSE_FLIGHT_NOT_FOUND",
+                    user_message="Vol introuvable. Veuillez vérifier le numéro de vol, la date, l’horaire et l’aéroport de départ.",
+                    requested_flight_number=flight_number,
+                    requested_flight_date=flight_date_raw,
+                    requested_departure_airport=departure_airport,
+                    requested_arrival_airport=arrival_airport,
+                )
+                return 1
+
+            if response_text == "[]":
+                append_error_log("Réponse API [] : interprétée comme vol introuvable.")
+                write_request_status(
+                    status="error_flight_not_found",
+                    error_code="EMPTY_LIST_FLIGHT_NOT_FOUND",
+                    user_message="Vol introuvable. Veuillez vérifier le numéro de vol, la date, l’horaire et l’aéroport de départ.",
+                    requested_flight_number=flight_number,
+                    requested_flight_date=flight_date_raw,
+                    requested_departure_airport=departure_airport,
+                    requested_arrival_airport=arrival_airport,
+                )
+                return 1
+
+            if response_text.startswith("<"):
+                append_error_log("Réponse HTML/non JSON détectée : interprétée comme indisponibilité du service.")
+                write_request_status(
+                    status="error_api_unavailable",
+                    error_code="NON_JSON_HTML_RESPONSE",
+                    user_message="Le service de recherche de vol est momentanément indisponible. Merci de réessayer dans quelques instants.",
+                    requested_flight_number=flight_number,
+                    requested_flight_date=flight_date_raw,
+                    requested_departure_airport=departure_airport,
+                    requested_arrival_airport=arrival_airport,
+                )
+                return 1
+
+            append_error_log(f"Réponse brute non JSON : {response_text[:500]}")
+            write_request_status(
+                status="error_flight_not_found",
+                error_code="NON_JSON_FLIGHT_NOT_FOUND",
+                user_message="Vol introuvable. Veuillez vérifier le numéro de vol, la date, l’horaire et l’aéroport de départ.",
+                requested_flight_number=flight_number,
+                requested_flight_date=flight_date_raw,
+                requested_departure_airport=departure_airport,
+                requested_arrival_airport=arrival_airport,
+            )
+            return 1
+#=====
+    except (requests.Timeout, requests.ConnectionError) as exc:
+        append_error_log(f"Erreur réseau lors de l'appel API : {exc}")
+        write_request_status(
+            status="error_api_unavailable",
+            error_code="NETWORK_ERROR",
+            user_message="Le service de recherche de vol est momentanément indisponible. Merci de réessayer dans quelques instants.",
+            requested_flight_number=flight_number,
+            requested_flight_date=flight_date_raw,
+            requested_departure_airport=departure_airport,
+            requested_arrival_airport=arrival_airport,
+        )
+        return 1
 
     except Exception as exc:
-        print(f"Erreur lors de l'appel API : {exc}", file=sys.stderr)
+        append_error_log(f"Erreur lors de l'appel API : {exc}")
         if hasattr(exc, "response") and exc.response is not None:
-            print(f"[DEBUG] Réponse brute : {exc.response.text}")
-        data = []
-        return 0
+            append_error_log(f"Réponse brute API : {exc.response.text}")
 
-    raw_json_output_path = os.path.join(
-        output_dir,
-        f"SingleFlightDataRespAPI_{generation_stamp}.json"
-    )
-    try:
-        with open(raw_json_output_path, "w", encoding="utf-8-sig") as jf:
-            json.dump(data, jf, ensure_ascii=False, indent=2)
-        print(f"Fichier JSON brut généré : {raw_json_output_path}")
-    except Exception as e:
-        print(f"[ALERTE] Impossible de générer le fichier JSON brut : {e}", file=sys.stderr)
+        write_request_status(
+            status="error_api_unavailable",
+            error_code="API_CALL_FAILED",
+            user_message="Le service de recherche de vol est momentanément indisponible. Merci de réessayer dans quelques instants.",
+            requested_flight_number=flight_number,
+            requested_flight_date=flight_date_raw,
+            requested_departure_airport=departure_airport,
+            requested_arrival_airport=arrival_airport,
+        )
+        return 1
+
+    raw_json_output_path = os.path.join(output_dir, f"SingleFlightDataRespAPI_{generation_stamp}.json")
+    with open(raw_json_output_path, "w", encoding="utf-8-sig") as jf:
+        json.dump(data, jf, ensure_ascii=False, indent=2)
+
+    records: List[Dict[str, Any]] = []
 
     if isinstance(data, list) and data:
         for flight in data:
             rec = extract_departure_record_all(flight, departure_airport)
             if rec:
                 records.append(rec)
-    else:
-        print("Aucun vol trouvé pour ce critère.")
 
-    json_output_path = os.path.join(
-        output_dir,
-        f"SingleFlightData_{generation_stamp}.json"
+    if not records:
+        append_error_log(
+            f"Aucun vol exploitable trouvé après extraction pour {flight_number} / {flight_date} / {departure_airport}"
+        )
+        write_request_status(
+            status="error_flight_not_found",
+            error_code="NO_RECORDS_AFTER_EXTRACTION",
+            user_message="Vol introuvable. Veuillez vérifier le numéro de vol, la date, l’horaire et l’aéroport de départ.",
+            requested_flight_number=flight_number,
+            requested_flight_date=flight_date_raw,
+            requested_departure_airport=departure_airport,
+            requested_arrival_airport=arrival_airport,
+        )
+        return 1
+
+    filtered_records, debug_info = filter_best_matching_records(
+        records=records,
+        requested_flight_number=flight_number,
+        requested_departure_airport=departure_airport,
+        requested_arrival_airport=arrival_airport,
+        requested_hour=requested_hour,
     )
-    try:
-        with open(json_output_path, "w", encoding="utf-8-sig") as jf:
-            json.dump(records, jf, ensure_ascii=False, indent=2)
-        print(f"Fichier JSON généré : {json_output_path}")
-    except Exception as e:
-        print(f"[ALERTE] Impossible de générer le fichier JSON : {e}", file=sys.stderr)
 
-    df = pd.DataFrame(records)
+    if not filtered_records:
+        if debug_info.get("after_flight_number_count", 0) > 0 and requested_hour:
+            append_error_log(
+                f"Aucun vol trouvé avec horaire compatible. requested_hour={requested_hour}, best_diff={debug_info.get('best_time_diff_minutes')}"
+            )
+            write_request_status(
+                status="error_time_mismatch",
+                error_code="TIME_MISMATCH",
+                user_message="Plusieurs vols ont été trouvés, mais aucun ne correspond précisément à l’horaire renseigné. Veuillez vérifier l’heure saisie.",
+                requested_flight_number=flight_number,
+                requested_flight_date=flight_date_raw,
+                requested_departure_airport=departure_airport,
+                requested_arrival_airport=arrival_airport,
+            )
+            return 1
+
+        append_error_log(
+            f"Aucun vol trouvé après filtrage métier. debug_info={json.dumps(debug_info, ensure_ascii=False)}"
+        )
+        write_request_status(
+            status="error_flight_not_found",
+            error_code="NO_MATCH_AFTER_FILTERING",
+            user_message="Vol introuvable. Veuillez vérifier le numéro de vol, la date, l’horaire et l’aéroport de départ.",
+            requested_flight_number=flight_number,
+            requested_flight_date=flight_date_raw,
+            requested_departure_airport=departure_airport,
+            requested_arrival_airport=arrival_airport,
+        )
+        return 1
+
+    selected_record = filtered_records[0]
+
+    warning_message = None
+    status = "success"
+
+    if is_codeshare_match(selected_record, flight_number):
+        status = "success_with_warning_codeshare"
+        warning_message = (
+            f"Le vol saisi correspond à un vol en partage de code. "
+            f"Les données ont été retrouvées sous la référence {selected_record.get('flight_number')}."
+        )
+
+    write_request_status(
+        status=status,
+        error_code=None,
+        user_message="Vol trouvé avec succès.",
+        warning_message=warning_message,
+        matched_flight_number=selected_record.get("flight_number"),
+        matched_scheduled_departure=selected_record.get("scheduled_departure"),
+        matched_departure_airport=selected_record.get("airport_origin"),
+        matched_arrival_airport=selected_record.get("airport_destination"),
+        requested_flight_number=flight_number,
+        requested_flight_date=flight_date_raw,
+        requested_departure_airport=departure_airport,
+        requested_arrival_airport=arrival_airport,
+    )
+
+    json_output_path = os.path.join(output_dir, f"SingleFlightData_{generation_stamp}.json")
+    with open(json_output_path, "w", encoding="utf-8-sig") as jf:
+        json.dump(filtered_records, jf, ensure_ascii=False, indent=2)
+
+    df = pd.DataFrame(filtered_records)
     df = reorder_columns(df)
 
     df["flight_number_principal"] = df["flight_number"]
@@ -557,18 +771,13 @@ def main() -> int:
             return 0, 0
 
         temp_df = pd.DataFrame(records_local)
-        grouped = (
-            temp_df.groupby(["airport", "movement_type"]).size().unstack(fill_value=0).reset_index()
-        )
+        grouped = temp_df.groupby(["airport", "movement_type"]).size().unstack(fill_value=0).reset_index()
         arrivals = grouped.loc[grouped["airport"] == airport_code, "arrival"].sum() if "arrival" in grouped.columns else 0
         departures = grouped.loc[grouped["airport"] == airport_code, "departure"].sum() if "departure" in grouped.columns else 0
         return arrivals, departures
 
-    if not df.empty:
-        departure_airport_code = df["airport_origin"].iloc[0]
-        arrivals, departures = build_congestion_dataframe_filtered(records, departure_airport_code)
-    else:
-        arrivals, departures = 0, 0
+    departure_airport_code = df["airport_origin"].iloc[0] if not df.empty else departure_airport
+    arrivals, departures = build_congestion_dataframe_filtered(filtered_records, departure_airport_code)
 
     df["total_global_arrivals_at_airport"] = arrivals
     df["total_global_departures_from_airport"] = departures
@@ -589,59 +798,20 @@ def main() -> int:
     ]
     df = df[cols]
 
-    print("[DEBUG] Aperçu des valeurs extraites avant filtrage strict :")
-    if not df.empty:
-        print(df[["flight_number", "flight_date", "airport_origin", "airport_destination"]])
-    else:
-        print("[DEBUG] DataFrame vide après extraction.")
-
-    if not df.empty and "codeshares" in df.columns:
-        print("[DEBUG] Aperçu des codeshares :")
-        print(df[["flight_number", "codeshares"]])
-
-    resp_output_path = os.path.join(
-        output_dir,
-        f"SingleFlightDataRespAPI_{generation_stamp}.csv"
-    )
-    try:
-        if isinstance(data, list) and data:
-            df_raw = pd.json_normalize(data)
-        else:
-            df_raw = pd.DataFrame()
-        df_raw.to_csv(resp_output_path, index=False, encoding="utf-8-sig")
-        print(f"[DEBUG] Fichier CSV brut (toutes les colonnes) créé : {resp_output_path}")
-    except Exception as e:
-        print(f"[ALERTE] Erreur lors de la création du CSV brut : {e}", file=sys.stderr)
+    resp_output_path = os.path.join(output_dir, f"SingleFlightDataRespAPI_{generation_stamp}.csv")
+    df_raw = pd.json_normalize(data) if isinstance(data, list) and data else pd.DataFrame()
+    df_raw.to_csv(resp_output_path, index=False, encoding="utf-8-sig")
 
     output_path = os.path.join(output_dir, f"SingleFlightData_{generation_stamp}.csv")
+    df.to_csv(output_path, index=False, encoding="utf-8-sig")
 
-    try:
-        if df.empty:
-            empty_row = {col: "" for col in df.columns}
-            df = pd.DataFrame([empty_row])
-
-        df.to_csv(output_path, index=False, encoding="utf-8-sig")
-
-        col_list_file = os.path.join(output_dir, f"SingleFlightColList_{generation_stamp}.csv")
-        with open(col_list_file, "w", encoding="utf-8-sig") as fcols:
-            for col in df.columns:
-                fcols.write(f"{col}\n")
-
-        print(f"Fichier des colonnes généré : {col_list_file}")
-
-    except PermissionError:
-        print(
-            f"Erreur : impossible d'écraser {output_path} car le fichier est ouvert dans Excel ou un autre programme.",
-            file=sys.stderr,
-        )
-        return 0
+    col_list_file = os.path.join(output_dir, f"SingleFlightColList_{generation_stamp}.csv")
+    with open(col_list_file, "w", encoding="utf-8-sig") as fcols:
+        for col in df.columns:
+            fcols.write(f"{col}\n")
 
     print(f"CSV généré : {output_path}")
     print(f"Nombre de lignes : {len(df)}")
-
-    if df.empty or (len(df) == 1 and all(str(v) == "" for v in df.iloc[0].values)):
-        print("Aucun vol trouvé après filtrage strict. (ligne vide ajoutée)")
-
     return 0
 
 
