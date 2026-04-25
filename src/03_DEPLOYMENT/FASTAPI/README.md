@@ -23,6 +23,19 @@ FASTAPI/
 ├── call_api/
 └── preprocessing/
 ```
+### Why does FastAPI contain a `preprocessing/` folder?
+
+The FastAPI service includes its own `preprocessing/` module because the deployed API must be self-contained on Hugging Face Spaces.
+
+Although similar logic exists in `src/01_ETL`, the deployment version is used specifically for online inference:
+
+- retrieving the single-flight dataset generated for one user request;
+- applying the same feature preparation logic as during training;
+- aligning live API data with the model input schema;
+- uploading processed inference files to S3;
+- keeping the FastAPI Space independent from the offline ETL folder.
+
+This avoids broken imports during deployment and makes the API easier to run as a standalone service.
 
 ## Main endpoints
 

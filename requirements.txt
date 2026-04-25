@@ -1,0 +1,20 @@
+# Root requirements file intentionally kept minimal.
+#
+# This repository is organized as a modular project.
+# Each deployable service defines and manages its own dependencies
+# in its dedicated folder.
+#
+# Deployment-specific requirements:
+# - FastAPI backend:
+#   src/03_DEPLOYMENT/FASTAPI/requirements.txt
+#
+# - Streamlit frontend:
+#   src/03_DEPLOYMENT/STREAMLIT/requirements.txt
+#
+# - MLflow tracking server:
+#   src/03_DEPLOYMENT/MLFLOW/requirements.txt
+#
+# Modeling and ETL dependencies are documented in their respective README files.
+#
+# This root file is kept for repository clarity and to avoid confusion for
+# reviewers expecting a requirements.txt at the project root.
